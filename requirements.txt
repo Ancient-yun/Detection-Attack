@@ -1,3 +1,7 @@
--r requirements/build.txt
--r requirements/optional.txt
--r requirements/runtime.txt
+mmcv==2.1.0
+mmengine==0.10.7
+opencv-python-headless
+setproctitle
+scipy
+ftfy
+regex

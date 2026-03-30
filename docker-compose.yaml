@@ -1,0 +1,22 @@
+services:
+  pytorch:
+    image: pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel
+    container_name: mmdet
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: >
+      bash -c "apt-get update && 
+      apt-get install -y libgl1-mesa-glx libglib2.0-0 tmux &&
+      pip install -r requirements.txt && 
+      pip install -v -e . &&
+      exec /bin/bash"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    tty: true
+    stdin_open: true

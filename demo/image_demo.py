@@ -54,6 +54,10 @@ Example:
         python demo/image_demo.py demo/demo.jpg rtmdet-ins_s_8xb32-300e_coco \
         --show
 """
+import torch
+# PyTorch 2.6 호환성을 위해 torch.load 임시 패치 적용
+_original_load = torch.load
+torch.load = lambda *args, **kwargs: _original_load(*args, **{**kwargs, 'weights_only': False})
 
 import ast
 from argparse import ArgumentParser

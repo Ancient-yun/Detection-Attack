@@ -46,6 +46,7 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
+.claude/
 
 # Translations
 *.mo
@@ -121,3 +122,5 @@ work_dirs/
 *.pth
 *.py~
 *.sh~
+
+result/
