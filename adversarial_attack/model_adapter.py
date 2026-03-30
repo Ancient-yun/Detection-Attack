@@ -206,3 +206,119 @@ class MMDetModelAdapter:
 
     def __call__(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
         return self.predict(x)
+
+
+class Yolov8ModelAdapter:
+    """Adapter that wraps ultralytics YOLOv8 model for decision-based attacks.
+
+    Converts YOLO outputs into the predict() dict format required by the pipeline.
+
+    Args:
+        checkpoint_path: Path to model checkpoint (e.g., 'yolov8n.pt'). Will download if not exists.
+        device: Device string (default: 'cuda:0').
+        score_thr: Detection confidence threshold (default: 0.3).
+        iou_thr: IoU threshold for bbox matching (default: 0.5).
+        success_thr: Minimum attack success rate for predict_label (default: 0.5).
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: str,
+        device: str = 'cuda:0',
+        score_thr: float = 0.3,
+        iou_thr: float = 0.5,
+        success_thr: float = 0.5,
+    ):
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            raise ImportError(
+                "Please install ultralytics to use YOLOv8: `pip install ultralytics`"
+            )
+
+        self.device = device
+        self.score_thr = score_thr
+        self.iou_thr = iou_thr
+        self.success_thr = success_thr
+
+        # Load YOLO model
+        self.model = YOLO(checkpoint_path)
+        self.model.to(device)
+        self.classes = list(self.model.names.values())
+        
+        # Original default input size for standard yolo
+        self._img_size = (640, 640)
+
+        # Reference detections
+        self._ref_bboxes = None
+        self._ref_labels = None
+        self._ref_label_int = 0
+
+    def _tensor_to_numpy_img(self, x: torch.Tensor) -> np.ndarray:
+        if x.dim() == 4:
+            x = x[0]
+        img = x.detach().cpu().numpy().transpose(1, 2, 0)
+        img = (img * 255).clip(0, 255).astype(np.uint8)
+        img = img[:, :, ::-1]  # RGB -> BGR
+        return np.ascontiguousarray(img)
+
+    def predict(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
+        img_np = self._tensor_to_numpy_img(x)
+
+        # verbose=False to suppress print spam on every prediction
+        results = self.model(img_np, verbose=False)
+        boxes = results[0].boxes
+
+        # Apply confidence threshold
+        mask = boxes.conf >= self.score_thr
+        bboxes = boxes.xyxy[mask].cpu().numpy()
+        labels = boxes.cls[mask].cpu().numpy().astype(int)
+        scores = boxes.conf[mask].cpu().numpy()
+
+        return {
+            'bboxes': bboxes,
+            'labels': labels,
+            'scores': scores,
+        }
+
+    def predict_label(self, x: torch.Tensor) -> int:
+        if self._ref_bboxes is None:
+            warnings.warn("Reference detections not set. Call set_reference() first.")
+            return 0
+
+        dets = self.predict(x)
+        result = match_detections(
+            self._ref_bboxes, self._ref_labels,
+            dets['bboxes'], dets['labels'],
+            iou_thr=self.iou_thr,
+        )
+
+        if result['total'] == 0:
+            return self._ref_label_int
+
+        success_rate = result['attack_success'] / result['total']
+
+        if success_rate >= self.success_thr:
+            return -1
+        return self._ref_label_int
+
+    def set_reference(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
+        dets = self.predict(x)
+        self._ref_bboxes = dets['bboxes']
+        self._ref_labels = dets['labels']
+        self._ref_label_int = 0
+        return dets
+
+    def check_attack_success(self, x: torch.Tensor) -> bool:
+        return self.predict_label(x) == -1
+
+    def get_detailed_result(self, x: torch.Tensor) -> Dict:
+        dets = self.predict(x)
+        return match_detections(
+            self._ref_bboxes, self._ref_labels,
+            dets['bboxes'], dets['labels'],
+            iou_thr=self.iou_thr,
+        )
+
+    def __call__(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
+        return self.predict(x)

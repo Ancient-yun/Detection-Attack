@@ -48,12 +48,17 @@ def parse_args():
         description='Adversarial attack on mmdetection models'
     )
     parser.add_argument(
-        '--config', required=True,
-        help='Path to mmdetection config file',
+        '--model-type', default='mmdet',
+        choices=['mmdet', 'yolov8'],
+        help='Target model architecture framework (default: mmdet)',
+    )
+    parser.add_argument(
+        '--config', default=None,
+        help='Path to mmdetection config file (Required for mmdet)',
     )
     parser.add_argument(
         '--checkpoint', required=True,
-        help='Path to model checkpoint (.pth)',
+        help='Path to model checkpoint (.pth or .pt)',
     )
     parser.add_argument(
         '--image', default=None,
@@ -126,7 +131,7 @@ def parse_args():
     )
     parser.add_argument(
         '--ann-file', default=None,
-        help='Path to COCO annotation JSON file for GT evaluation',
+        help='Path to COCO annotation JSON file or YOLO txt dir for GT eval',
     )
     return parser.parse_args()
 
@@ -135,13 +140,20 @@ def main():
     args = parse_args()
 
     # Validate input
+    if args.model_type == 'mmdet' and args.config is None:
+        raise ValueError("--config is required when --model-type is mmdet")
+
     if args.image is None and args.image_dir is None:
         raise ValueError("Must specify --image or --image-dir")
 
     # Build output directory: result/[attack]/[model]/[date]/
     if args.output_dir == 'outputs/attack_results':
         # Default: use structured path
-        output_dir = build_output_dir(args.attack, args.config)
+        if args.model_type == 'mmdet':
+            output_dir = build_output_dir(args.attack, args.config)
+        else:
+            # Fallback for yolov8 checkpoint structure
+            output_dir = build_output_dir(args.attack, args.checkpoint)
     else:
         output_dir = args.output_dir
 
@@ -159,6 +171,7 @@ def main():
 
     # Create pipeline
     pipeline = DetectionAttackPipeline(
+        model_type=args.model_type,
         config_path=args.config,
         checkpoint_path=args.checkpoint,
         attack_method=args.attack,
@@ -177,9 +190,13 @@ def main():
         extensions = ('*.jpg', '*.jpeg', '*.png', '*.bmp')
         image_paths = []
         for ext in extensions:
-            image_paths.extend(
-                glob.glob(os.path.join(args.image_dir, ext))
-            )
+            # Search flat directory
+            image_paths.extend(glob.glob(os.path.join(args.image_dir, ext)))
+            # Search nested directories recursively (e.g., images/val/)
+            image_paths.extend(glob.glob(os.path.join(args.image_dir, '**', ext), recursive=True))
+        
+        # Remove duplicates
+        image_paths = list(set(image_paths))
         image_paths.sort()
         if not image_paths:
             raise FileNotFoundError(

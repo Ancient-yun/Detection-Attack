@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from mmdet.evaluation.functional import eval_map
 
-from .model_adapter import MMDetModelAdapter
+from .model_adapter import MMDetModelAdapter, Yolov8ModelAdapter
 from .sparse_evo import SpaEvoAtt
 from .pointwise import PointWiseAtt
 from .metrics import compute_l0, match_detections
@@ -29,8 +29,9 @@ class DetectionAttackPipeline:
     → attack execution → result evaluation and saving.
 
     Args:
+        model_type: 'mmdet' or 'yolov8'.
         config_path: Path to mmdetection config file.
-        checkpoint_path: Path to model checkpoint (.pth).
+        checkpoint_path: Path to model checkpoint (.pth or .pt).
         attack_method: 'sparse_evo' or 'pointwise'.
         device: CUDA device string.
         score_thr: Detection confidence threshold.
@@ -46,8 +47,9 @@ class DetectionAttackPipeline:
 
     def __init__(
         self,
-        config_path: str,
-        checkpoint_path: str,
+        model_type: str = 'mmdet',
+        config_path: str = None,
+        checkpoint_path: str = None,
         attack_method: str = 'sparse_evo',
         device: str = 'cuda:0',
         score_thr: float = 0.3,
@@ -69,12 +71,22 @@ class DetectionAttackPipeline:
         self.log_interval = log_interval
 
         # Initialize model adapter
-        print(f"[Pipeline] Loading model from {config_path}...")
-        self.model = MMDetModelAdapter(
-            config_path, checkpoint_path,
-            device=device, score_thr=score_thr, iou_thr=iou_thr,
-            success_thr=success_thr,
-        )
+        print(f"[Pipeline] Loading {model_type} model from {checkpoint_path}...")
+        if model_type == 'mmdet':
+            self.model = MMDetModelAdapter(
+                config_path, checkpoint_path,
+                device=device, score_thr=score_thr, iou_thr=iou_thr,
+                success_thr=success_thr,
+            )
+        elif model_type == 'yolov8':
+            self.model = Yolov8ModelAdapter(
+                checkpoint_path,
+                device=device, score_thr=score_thr, iou_thr=iou_thr,
+                success_thr=success_thr,
+            )
+        else:
+            raise ValueError(f"Unsupported model_type: {model_type}")
+
         print(
             f"[Pipeline] Model loaded. "
             f"Classes: {len(self.model.classes)}, "
@@ -743,50 +755,87 @@ class DetectionAttackPipeline:
         ann_file: str,
         iou_thr: float = 0.5,
     ) -> Dict:
-        """Compute mAP using real COCO GT annotations.
+        """Compute mAP using real GT annotations.
 
         Measures actual detection performance before/after attack
-        against ground truth labels.
+        against ground truth labels (COCO JSON or YOLO format directory).
 
         Args:
             results: List of result dicts from run_attack.
-            ann_file: Path to COCO annotation JSON.
+            ann_file: Path to COCO annotation JSON or YOLO txt dir.
             iou_thr: IoU threshold for mAP evaluation.
 
         Returns:
             Dict with orig_mAP, adv_mAP, per_class_ap, mAP_drop.
         """
         n_classes = len(self.model.classes)
-
-        # Load COCO annotations
-        with open(ann_file, 'r') as f:
-            coco_data = json.load(f)
-
-        # Build category_id -> contiguous index mapping
-        cat_ids = sorted([c['id'] for c in coco_data['categories']])
-        cat_id_to_idx = {cid: i for i, cid in enumerate(cat_ids)}
-
-        # Build image filename -> annotations mapping
-        img_id_to_file = {
-            img['id']: img['file_name'] for img in coco_data['images']
-        }
-        img_id_to_size = {
-            img['id']: (img['height'], img['width']) for img in coco_data['images']
-        }
-        file_to_anns = {}
-        for ann in coco_data['annotations']:
-            if ann.get('iscrowd', 0):
-                continue
-            fname = img_id_to_file[ann['image_id']]
-            if fname not in file_to_anns:
-                file_to_anns[fname] = {'bboxes': [], 'labels': []}
-            # COCO bbox: [x, y, w, h] -> [x1, y1, x2, y2]
-            x, y, w, h = ann['bbox']
-            file_to_anns[fname]['bboxes'].append([x, y, x + w, y + h])
-            file_to_anns[fname]['labels'].append(cat_id_to_idx[ann['category_id']])
-
-        # Model input size for bbox rescaling
         model_h, model_w = self.model._img_size
+        file_to_anns = {}
+
+        if os.path.isdir(ann_file):
+            # Assume YOLO format directory (e.g., labels/val)
+            for txt_name in os.listdir(ann_file):
+                if not txt_name.endswith('.txt'):
+                    continue
+                base_name = os.path.splitext(txt_name)[0]
+                file_to_anns[base_name] = {'bboxes': [], 'labels': []}
+
+                txt_path = os.path.join(ann_file, txt_name)
+                with open(txt_path, 'r') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 5:
+                            cls_id = int(parts[0])
+                            xc, yc, w, h = map(float, parts[1:5])
+
+                            # YOLO matches: box bounds in [0, 1] normalized scale
+                            # Convert directly to model_w, model_h coordinates since gt_map
+                            # uses model_w/model_h coordinate space inside eval_map
+                            x1 = (xc - w / 2) * model_w
+                            y1 = (yc - h / 2) * model_h
+                            x2 = (xc + w / 2) * model_w
+                            y2 = (yc + h / 2) * model_h
+
+                            file_to_anns[base_name]['bboxes'].append([x1, y1, x2, y2])
+                            file_to_anns[base_name]['labels'].append(cls_id)
+        else:
+            # Assume COCO JSON
+            with open(ann_file, 'r') as f:
+                coco_data = json.load(f)
+
+            # Build category_id -> contiguous index mapping
+            cat_ids = sorted([c['id'] for c in coco_data['categories']])
+            cat_id_to_idx = {cid: i for i, cid in enumerate(cat_ids)}
+
+            img_id_to_file = {
+                img['id']: img['file_name'] for img in coco_data['images']
+            }
+            img_id_to_size = {
+                img['id']: (img['height'], img['width']) for img in coco_data['images']
+            }
+            for ann in coco_data['annotations']:
+                if ann.get('iscrowd', 0):
+                    continue
+                fname = img_id_to_file[ann['image_id']]
+                base_name = os.path.splitext(os.path.basename(fname))[0]
+                if base_name not in file_to_anns:
+                    file_to_anns[base_name] = {'bboxes': [], 'labels': []}
+
+                # COCO bbox: [x, y, w, h] -> [x1, y1, x2, y2]
+                x, y, w, h = ann['bbox']
+
+                # Scale from orig size directly to model input size here
+                orig_h, orig_w = img_id_to_size[ann['image_id']]
+                scale_x = model_w / orig_w
+                scale_y = model_h / orig_h
+
+                file_to_anns[base_name]['bboxes'].append([
+                    x * scale_x,
+                    y * scale_y,
+                    (x + w) * scale_x,
+                    (y + h) * scale_y
+                ])
+                file_to_anns[base_name]['labels'].append(cat_id_to_idx[ann['category_id']])
 
         annotations = []
         orig_det_results = []
@@ -794,25 +843,13 @@ class DetectionAttackPipeline:
 
         for r in results:
             fname = os.path.basename(r['image_path'])
+            base_name = os.path.splitext(fname)[0]
             orig_dets = r['orig_detections']
             adv_dets = r['adv_detections']
 
-            if fname in file_to_anns:
-                gt_bboxes = np.array(file_to_anns[fname]['bboxes'], dtype=np.float32)
-                gt_labels = np.array(file_to_anns[fname]['labels'], dtype=np.int64)
-
-                # Rescale GT bboxes from original image size to model input size
-                img_id = None
-                for img in coco_data['images']:
-                    if img['file_name'] == fname:
-                        img_id = img['id']
-                        break
-                if img_id is not None:
-                    orig_h, orig_w = img_id_to_size[img_id]
-                    scale_x = model_w / orig_w
-                    scale_y = model_h / orig_h
-                    gt_bboxes[:, [0, 2]] *= scale_x
-                    gt_bboxes[:, [1, 3]] *= scale_y
+            if base_name in file_to_anns:
+                gt_bboxes = np.array(file_to_anns[base_name]['bboxes'], dtype=np.float32)
+                gt_labels = np.array(file_to_anns[base_name]['labels'], dtype=np.int64)
             else:
                 gt_bboxes = np.zeros((0, 4), dtype=np.float32)
                 gt_labels = np.zeros((0,), dtype=np.int64)
