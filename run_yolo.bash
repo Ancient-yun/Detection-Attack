@@ -21,7 +21,7 @@ IOU_THR=0.5
 SUCCESS_THR=0.7
 SEED=42
 LOG_INTERVAL=50
-NUM_IMAGES=2
+NUM_IMAGES=2 # "all"을 입력하면 전체 이미지 처리, 숫자를 입력하면 해당 개수만큼 처리
 
 run_yolo_attacks() {
   local ds_name=$1
@@ -45,7 +45,7 @@ run_yolo_attacks() {
     --iou-thr $IOU_THR \
     --success-thr $SUCCESS_THR \
     --seed $SEED \
-    --num-images $NUM_IMAGES \
+    --num-images "$NUM_IMAGES" \
     --pop-size 10 \
     --cr 0.9 \
     --mu 0.01
@@ -63,7 +63,7 @@ run_yolo_attacks() {
     --iou-thr $IOU_THR \
     --success-thr $SUCCESS_THR \
     --seed $SEED \
-    --num-images $NUM_IMAGES \
+    --num-images "$NUM_IMAGES" \
     --npix 0.1
 }
 

@@ -7,7 +7,8 @@
 # Results : result/[attack_method]/[model]/[date]/
 # ============================================================
 
-# num_images=2
+NUM_IMAGES="all" # "all"을 입력하면 전체 이미지 처리, 숫자를 입력하면 해당 개수만큼 처리
+
 CONFIG=configs/ddq/ddq-detr-4scale_r50_8xb2-12e_coco.py
 CHECKPOINT=ckpt/ddq-detr-4scale_r50_8xb2-12e_coco_20230809_170711-42528127.pth
 IMAGE_DIR=data/coco_amnesia/val2017
@@ -37,6 +38,7 @@ python run_attack.py \
   --iou-thr $IOU_THR \
   --success-thr $SUCCESS_THR \
   --seed $SEED \
+  --num-images "$NUM_IMAGES" \
   --pop-size 10 \
   --cr 0.9 \
   --mu 0.01
@@ -59,6 +61,7 @@ python run_attack.py \
   --iou-thr $IOU_THR \
   --success-thr $SUCCESS_THR \
   --seed $SEED \
+  --num-images "$NUM_IMAGES" \
   --npix 0.1
 
 echo "=========================================="

@@ -69,8 +69,8 @@ def parse_args():
         help='Path to directory of images for batch attack',
     )
     parser.add_argument(
-        '--num-images', type=int, default=None,
-        help='Limit number of images to attack (default: all)',
+        '--num-images', default='all',
+        help='Limit number of images to attack ("all" or an integer, default: "all")',
     )
     parser.add_argument(
         '--dataset-name', default='dataset',
@@ -208,8 +208,12 @@ def main():
             )
 
     # Limit number of images
-    if args.num_images is not None:
-        image_paths = image_paths[:args.num_images]
+    if args.num_images is not None and str(args.num_images).lower() != 'all':
+        try:
+            limit = int(args.num_images)
+            image_paths = image_paths[:limit]
+        except ValueError:
+            print(f"[Warning] Invalid --num-images value '{args.num_images}'. Using all images.")
 
     print(f"[Main] {len(image_paths)} image(s) to attack")
     print(f"[Main] Attack method: {args.attack}")
@@ -237,7 +241,7 @@ def main():
     elapsed_time = time.time() - start_time
 
     # Save results (images + CSV)
-    pipeline.save_results(results, output_dir)
+    pipeline.save_results(results, output_dir, ann_file=args.ann_file)
 
     # Compute mAP
     # Benign: model predictions on original images as GT
