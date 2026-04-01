@@ -67,12 +67,20 @@ bash run.bash
 ```
 
 #### B. YOLOv8 최신 모델 기반 공격 (`run_yolo.bash`)
-Ultralytics YOLO 기반으로 동작하며, 모델 체크포인트를 `yolov8n.pt` 처럼 넣어주기만 하면 가중치가 없더라도 환경에서 자동으로 내려받습니다.
+Ultralytics YOLO 기반으로 동작하며, 모델 체크포인트를 설정하여 공격을 수행할 수 있습니다.
+미리 YOLO 가중치를 `ckpt` 폴더에 다운로드 받아 사용하는 것을 권장합니다.
+
+```bash
+# 가중치 파일 다운로드 (ckpt 폴더 하위로)
+mkdir -p ckpt
+curl -L -o ckpt/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt
+```
+
 ```bash
 # 파일명: run_yolo.bash
 
 MODEL_TYPE="yolov8"
-CHECKPOINT="yolov8n.pt"  # 모델 가중치 파일명 (자동 다운로드 됨)
+CHECKPOINT="ckpt/yolov8n.pt"  # ckpt 하위에 저장된 모델 가중치 경로
 IMAGE_DIR="data/Argoverse_sample1_amnesia" # 재귀적으로 하위 `images/val`을 자동 추적
 ANN_FILE="data/Argoverse_sample1_amnesia/labels/val" # YOLO 포맷 폴더를 주면 자동으로 파싱
 ```

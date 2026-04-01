@@ -2,7 +2,7 @@
 # ============================================================
 # Adversarial Attack Experiments on YOLOv8 (Argoverse)
 # ============================================================
-# Model   : YOLOv8 Nano (yolov8n.pt) - Auto downloaded
+# Model   : YOLOv8 Nano (ckpt/yolov8n.pt)
 # Dataset : data/Argoverse_sample1_amnesia
 # Results : result/[attack_method]/yolov8n/[date]/
 # ============================================================
