@@ -454,6 +454,8 @@ class DetectionAttackPipeline:
         labels: np.ndarray,
         scores: np.ndarray,
         classes: list,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
     ) -> np.ndarray:
         """Draw bounding boxes and labels on an image.
 
@@ -478,7 +480,10 @@ class DetectionAttackPipeline:
             zip(bboxes, labels, scores)
         ):
             color = colors[int(label) % len(colors)]
-            x1, y1, x2, y2 = bbox.astype(int)
+            x1 = int(bbox[0] * scale_x)
+            y1 = int(bbox[1] * scale_y)
+            x2 = int(bbox[2] * scale_x)
+            y2 = int(bbox[3] * scale_y)
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
 
             cls_name = classes[label] if label < len(classes) else f'cls_{label}'
@@ -502,6 +507,7 @@ class DetectionAttackPipeline:
         self,
         results: List[Dict],
         output_dir: str,
+        ann_file: str = None,
     ) -> None:
         """Save attack results to disk.
 
@@ -559,25 +565,39 @@ class DetectionAttackPipeline:
             match = r['match_result']
 
             # Convert tensors to BGR images
-            # Re-load original image for visualization
             orig_img = cv2.imread(r['image_path'])
+            scale_x, scale_y = 1.0, 1.0
+            
             if orig_img is not None:
-                h, w = self.model._img_size
-                orig_bgr = cv2.resize(orig_img, (w, h))
+                orig_h, orig_w = orig_img.shape[:2]
+                model_h, model_w = self.model._img_size
+                scale_x = orig_w / model_w
+                scale_y = orig_h / model_h
+                orig_bgr = cv2.resize(orig_img, (model_w, model_h))
             else:
                 orig_bgr = self._tensor_to_bgr(
                     self.load_image(r['image_path'])
                 )
             adv_bgr = self._tensor_to_bgr(r['adv_image'])
 
-            # Draw bboxes (no title text on images)
+            # Upscale for orig and adv visual images
+            if orig_img is not None:
+                orig_bgr_up = cv2.resize(orig_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                adv_bgr_up = cv2.resize(adv_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+            else:
+                orig_bgr_up = orig_bgr.copy()
+                adv_bgr_up = adv_bgr.copy()
+
+            # Draw bboxes (on the ORIGINAL upscaled images)
             orig_vis = self._draw_detections(
-                orig_bgr, orig_dets['bboxes'], orig_dets['labels'],
+                orig_bgr_up, orig_dets['bboxes'], orig_dets['labels'],
                 orig_dets['scores'], self.model.classes,
+                scale_x=scale_x, scale_y=scale_y
             )
             adv_vis = self._draw_detections(
-                adv_bgr, adv_dets['bboxes'], adv_dets['labels'],
+                adv_bgr_up, adv_dets['bboxes'], adv_dets['labels'],
                 adv_dets['scores'], self.model.classes,
+                scale_x=scale_x, scale_y=scale_y
             )
 
             # Save individual images into per-image subdirectory
@@ -638,6 +658,21 @@ class DetectionAttackPipeline:
                 f.write(f"Misclassified: {match['misclassified']}\n")
                 f.write(f"Attack success rate: {r['success_rate']:.4f} ({r['success_rate']:.2%})\n")
                 f.write(f"Attack result: {'SUCCEEDED' if r['is_successful'] else 'FAILED'}\n")
+                
+                # Compute single-image mAP
+                b_map = self.compute_benign_map([r], iou_thr=self.model.iou_thr, verbose=False)
+                f.write(f"\n--- Benign mAP (IoU={self.model.iou_thr}) ---\n")
+                f.write(f"  Orig: {b_map['orig_mAP']:.4f}\n")
+                f.write(f"  Adv : {b_map['adv_mAP']:.4f}\n")
+                f.write(f"  Drop: {b_map['mAP_drop']:.4f}\n")
+                
+                if ann_file:
+                    gt_map = self.compute_gt_map([r], ann_file, iou_thr=self.model.iou_thr, verbose=False)
+                    f.write(f"\n--- GT mAP (IoU={self.model.iou_thr}) ---\n")
+                    f.write(f"  Orig: {gt_map['orig_mAP']:.4f}\n")
+                    f.write(f"  Adv : {gt_map['adv_mAP']:.4f}\n")
+                    f.write(f"  Drop: {gt_map['mAP_drop']:.4f}\n")
+
                 f.write(f"\n--- Original Detections ---\n")
                 for i, (bbox, label, score) in enumerate(
                     zip(orig_dets['bboxes'], orig_dets['labels'], orig_dets['scores'])
@@ -691,6 +726,7 @@ class DetectionAttackPipeline:
         self,
         results: List[Dict],
         iou_thr: float = 0.5,
+        verbose: bool = True,
     ) -> Dict:
         """Compute mAP using benign model predictions as GT.
 
@@ -742,10 +778,11 @@ class DetectionAttackPipeline:
             'mAP_drop': float(orig_mAP - adv_mAP),
         }
 
-        print(f"\n[Pipeline] === Benign mAP (IoU={iou_thr}) ===")
-        print(f"  Benign orig mAP : {orig_mAP:.4f}")
-        print(f"  Benign adv mAP  : {adv_mAP:.4f}")
-        print(f"  mAP Drop        : {result['mAP_drop']:.4f}")
+        if verbose:
+            print(f"\n[Pipeline] === Benign mAP (IoU={iou_thr}) ===")
+            print(f"  Benign orig mAP : {orig_mAP:.4f}")
+            print(f"  Benign adv mAP  : {adv_mAP:.4f}")
+            print(f"  mAP Drop        : {result['mAP_drop']:.4f}")
 
         return result
 
@@ -754,6 +791,7 @@ class DetectionAttackPipeline:
         results: List[Dict],
         ann_file: str,
         iou_thr: float = 0.5,
+        verbose: bool = True,
     ) -> Dict:
         """Compute mAP using real GT annotations.
 
@@ -882,9 +920,10 @@ class DetectionAttackPipeline:
             'mAP_drop': float(orig_mAP - adv_mAP),
         }
 
-        print(f"\n[Pipeline] === GT mAP (IoU={iou_thr}) ===")
-        print(f"  GT orig mAP : {orig_mAP:.4f}")
-        print(f"  GT adv mAP  : {adv_mAP:.4f}")
-        print(f"  mAP Drop    : {result['mAP_drop']:.4f}")
+        if verbose:
+            print(f"\n[Pipeline] === GT mAP (IoU={iou_thr}) ===")
+            print(f"  GT orig mAP : {orig_mAP:.4f}")
+            print(f"  GT adv mAP  : {adv_mAP:.4f}")
+            print(f"  mAP Drop    : {result['mAP_drop']:.4f}")
 
         return result
