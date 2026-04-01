@@ -31,6 +31,7 @@ python run_attack.py \
   --image-dir $IMAGE_DIR \
   --ann-file $ANN_FILE \
   --attack sparse_evo \
+  --dataset-name "COCO_Amnesia" \
   --max-query $MAX_QUERY \
   --score-thr $SCORE_THR \
   --iou-thr $IOU_THR \
@@ -52,6 +53,7 @@ python run_attack.py \
   --image-dir $IMAGE_DIR \
   --ann-file $ANN_FILE \
   --attack pointwise_multi_sched \
+  --dataset-name "COCO_Amnesia" \
   --max-query $MAX_QUERY \
   --score-thr $SCORE_THR \
   --iou-thr $IOU_THR \

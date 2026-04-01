@@ -73,6 +73,10 @@ def parse_args():
         help='Limit number of images to attack (default: all)',
     )
     parser.add_argument(
+        '--dataset-name', default='dataset',
+        help='Name of the dataset for organizing results (default: dataset)',
+    )
+    parser.add_argument(
         '--attack', default='sparse_evo',
         choices=['sparse_evo', 'pointwise', 'pointwise_multi',
                  'pointwise_multi_sched'],
@@ -146,14 +150,14 @@ def main():
     if args.image is None and args.image_dir is None:
         raise ValueError("Must specify --image or --image-dir")
 
-    # Build output directory: result/[attack]/[model]/[date]/
+    # Build output directory: result/[attack]/[dataset_name]/[model]/[date]/
     if args.output_dir == 'outputs/attack_results':
         # Default: use structured path
         if args.model_type == 'mmdet':
-            output_dir = build_output_dir(args.attack, args.config)
+            output_dir = build_output_dir(args.attack, args.dataset_name, args.config)
         else:
             # Fallback for yolov8 checkpoint structure
-            output_dir = build_output_dir(args.attack, args.checkpoint)
+            output_dir = build_output_dir(args.attack, args.dataset_name, args.checkpoint)
     else:
         output_dir = args.output_dir
 

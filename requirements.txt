@@ -5,3 +5,4 @@ setproctitle
 scipy
 ftfy
 regex
+ultralytics

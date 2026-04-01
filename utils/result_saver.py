@@ -9,11 +9,11 @@ import numpy as np
 from datetime import datetime
 
 
-def build_output_dir(attack_method, config_path):
-    """Build output directory: result/[attack_method]/[model_name]/[date]/"""
+def build_output_dir(attack_method, dataset_name, config_path):
+    """Build output directory: result/[attack_method]/[dataset_name]/[model_name]/[date]/"""
     model_name = os.path.splitext(os.path.basename(config_path))[0]
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join("result", attack_method, model_name, date_str)
+    return os.path.join("result", attack_method, dataset_name, model_name, date_str)
 
 
 def save_experiment_report(results, args, output_dir, elapsed_time,
@@ -132,7 +132,8 @@ def _write_config_section(f, args, n_images, elapsed_time):
     f.write(f"  Date/Time         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
     f.write(f"  Config            : {args.config}\n")
     f.write(f"  Checkpoint        : {args.checkpoint}\n")
-    f.write(f"  Model Name        : {os.path.splitext(os.path.basename(args.config))[0]}\n")
+    model_name_source = args.config if args.config is not None else args.checkpoint
+    f.write(f"  Model Name        : {os.path.splitext(os.path.basename(model_name_source))[0]}\n")
     f.write(f"  Attack Method     : {args.attack}\n")
     f.write(f"  Device            : {args.device}\n")
     f.write(f"  Max Queries       : {args.max_query}\n")
