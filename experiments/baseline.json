@@ -1,0 +1,106 @@
+{
+  "name": "baseline",
+  "result_root": "result",
+  "comparison": {
+    "baseline_score_thr": 0.3,
+    "target_score_thr": 0.3
+  },
+  "run": {
+    "name": "baseline",
+    "resume_partial": false
+  },
+  "defaults": {
+    "num_images": "all",
+    "max_query": 1000,
+    "iou_thr": 0.5,
+    "success_thr": 0.7,
+    "seed": 42
+  },
+  "attack_defaults": {
+    "sparse_evo": {
+      "pop_size": 10,
+      "cr": 0.9,
+      "mu": 0.01
+    },
+    "pointwise_multi_sched": {
+      "npix": 0.1
+    }
+  },
+  "experiments": [
+    {
+      "id": "atss_coco_amnesia",
+      "target": "ATSS R50-FPN / COCO Amnesia",
+      "short": "ATSS",
+      "model_type": "mmdet",
+      "config": "configs/atss/atss_r50_fpn_1x_coco.py",
+      "checkpoint": "ckpt/atss_r50_fpn_1x_coco_20200209-985f7bd0.pth",
+      "image_dir": "data/coco_amnesia/val2017",
+      "ann_file": "data/coco_amnesia/instances_val2017_ori.json",
+      "baseline_dataset_name": "COCO_Amnesia",
+      "dataset_name": "COCO_Amnesia",
+      "model": "atss_r50_fpn_1x_coco",
+      "expected_images": 100,
+      "attacks": ["sparse_evo", "pointwise_multi_sched"]
+    },
+    {
+      "id": "ddq_coco_amnesia",
+      "target": "DDQ-DETR R50 / COCO Amnesia",
+      "short": "DDQ",
+      "model_type": "mmdet",
+      "config": "configs/ddq/ddq-detr-4scale_r50_8xb2-12e_coco.py",
+      "checkpoint": "ckpt/ddq-detr-4scale_r50_8xb2-12e_coco_20230809_170711-42528127.pth",
+      "image_dir": "data/coco_amnesia/val2017",
+      "ann_file": "data/coco_amnesia/instances_val2017_ori.json",
+      "baseline_dataset_name": "COCO_Amnesia",
+      "dataset_name": "COCO_Amnesia",
+      "model": "ddq-detr-4scale_r50_8xb2-12e_coco",
+      "expected_images": 100,
+      "attacks": ["sparse_evo", "pointwise_multi_sched"]
+    },
+    {
+      "id": "deformable_detr_coco_amnesia",
+      "target": "Deformable DETR R50 / COCO Amnesia",
+      "short": "Deformable",
+      "model_type": "mmdet",
+      "config": "configs/deformable_detr/deformable-detr_r50_16xb2-50e_coco.py",
+      "checkpoint": "ckpt/deformable-detr_r50_16xb2-50e_coco_20221029_210934-6bc7d21b.pth",
+      "image_dir": "data/coco_amnesia/val2017",
+      "ann_file": "data/coco_amnesia/instances_val2017_ori.json",
+      "baseline_dataset_name": "COCO_Amnesia",
+      "dataset_name": "COCO_Amnesia",
+      "model": "deformable-detr_r50_16xb2-50e_coco",
+      "expected_images": 100,
+      "attacks": ["sparse_evo", "pointwise_multi_sched"]
+    },
+    {
+      "id": "yolov8n_argoverse",
+      "target": "YOLOv8n / Argoverse",
+      "short": "YOLO Argo",
+      "model_type": "yolov8",
+      "checkpoint": "ckpt/yolov8n.pt",
+      "image_dir": "data/Argoverse_sample1_amnesia",
+      "ann_file": "data/Argoverse_sample1_amnesia/labels/val",
+      "baseline_dataset_name": "Argoverse",
+      "dataset_name": "Argoverse",
+      "model": "yolov8n",
+      "expected_images": 2,
+      "num_images": 2,
+      "attacks": ["sparse_evo", "pointwise_multi_sched"]
+    },
+    {
+      "id": "yolov8n_coco",
+      "target": "YOLOv8n / COCO",
+      "short": "YOLO COCO",
+      "model_type": "yolov8",
+      "checkpoint": "ckpt/yolov8n.pt",
+      "image_dir": "data/coco_amnesia/val2017",
+      "ann_file": "data/coco_amnesia/instances_val2017_ori.json",
+      "baseline_dataset_name": "COCO",
+      "dataset_name": "COCO",
+      "model": "yolov8n",
+      "expected_images": 2,
+      "num_images": 2,
+      "attacks": ["sparse_evo", "pointwise_multi_sched"]
+    }
+  ]
+}
