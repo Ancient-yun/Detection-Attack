@@ -87,6 +87,13 @@ class MMDetModelAdapter:
         """
         if x.dim() == 4:
             x = x[0]
+
+        if x.is_cuda and x.dtype == torch.float32:
+            # Preserve legacy input bytes while avoiding a float32 CPU copy.
+            img = x.detach().clamp(0, 1).mul(255).to(torch.uint8)
+            img = img[[2, 1, 0], :, :].permute(1, 2, 0).contiguous()
+            return img.cpu().numpy()
+
         # [C, H, W] → [H, W, C], RGB → BGR, [0,1] → [0,255]
         img = x.detach().cpu().numpy().transpose(1, 2, 0)
         img = (img * 255).clip(0, 255).astype(np.uint8)
