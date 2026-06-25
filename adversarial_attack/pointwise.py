@@ -35,6 +35,12 @@ class PointWiseAtt:
         self.log_interval = log_interval
         self.verbose = verbose
 
+    def _device(self) -> torch.device:
+        return torch.device(getattr(self.model, "device", "cuda:0"))
+
+    def _tensor(self, img: np.ndarray) -> torch.Tensor:
+        return torch.from_numpy(img).float().to(self._device())
+
     def _check_adv_status(
         self,
         img: np.ndarray,
@@ -52,7 +58,7 @@ class PointWiseAtt:
             True if adversarial.
         """
         pred_label = self.model.predict_label(
-            torch.from_numpy(img).float().cuda()
+            self._tensor(img)
         )
         if self.flag:
             return pred_label == tlabel
@@ -150,8 +156,8 @@ class PointWiseAtt:
         n_queries = 0
         D = np.zeros(max_query + 500, dtype=int)
         d = compute_l0(
-            torch.from_numpy(oimg).cuda(),
-            torch.from_numpy(x.reshape(shape)).cuda(),
+            self._tensor(oimg),
+            self._tensor(x.reshape(shape)),
         )
         snapshots = {}
         next_snap_query = snapshot_interval
@@ -179,8 +185,8 @@ class PointWiseAtt:
                     end_qry = n_queries
                     D[start_qry:end_qry] = d
                     d = compute_l0(
-                        torch.from_numpy(oimg).cuda(),
-                        torch.from_numpy(x.reshape(shape)).cuda(),
+                        self._tensor(oimg),
+                        self._tensor(x.reshape(shape)),
                     )
                     if self.verbose and n_queries % self.log_interval == 0:
                         print(
@@ -190,7 +196,7 @@ class PointWiseAtt:
                     x[index] = old_value
 
                 if n_queries >= next_snap_query:
-                    snapshots[next_snap_query] = torch.from_numpy(x.reshape(shape)).clone().float().cuda()
+                    snapshots[next_snap_query] = self._tensor(x.reshape(shape)).clone()
                     next_snap_query += snapshot_interval
 
                 if n_queries >= max_query:
@@ -225,8 +231,8 @@ class PointWiseAtt:
                     end_qry = n_queries
                     D[start_qry:end_qry] = d
                     d = compute_l0(
-                        torch.from_numpy(oimg).cuda(),
-                        torch.from_numpy(x.reshape(shape)).cuda(),
+                        self._tensor(oimg),
+                        self._tensor(x.reshape(shape)),
                     )
                     improved = True
                 else:
@@ -245,8 +251,8 @@ class PointWiseAtt:
                         end_qry = n_queries
                         D[start_qry:end_qry] = d
                         d = compute_l0(
-                            torch.from_numpy(oimg).cuda(),
-                            torch.from_numpy(x.reshape(shape)).cuda(),
+                            self._tensor(oimg),
+                            self._tensor(x.reshape(shape)),
                         )
                         if n_queries % self.log_interval == 0:
                             print(
@@ -257,7 +263,7 @@ class PointWiseAtt:
                         x[index] = old_value
 
                 if n_queries >= next_snap_query:
-                    snapshots[next_snap_query] = torch.from_numpy(x.reshape(shape)).clone().float().cuda()
+                    snapshots[next_snap_query] = self._tensor(x.reshape(shape)).clone()
                     next_snap_query += snapshot_interval
 
                 if n_queries >= max_query:
@@ -269,8 +275,8 @@ class PointWiseAtt:
 
         # Final L0 measurement
         d = compute_l0(
-            torch.from_numpy(oimg).cuda(),
-            torch.from_numpy(x.reshape(shape)).cuda(),
+            self._tensor(oimg),
+            self._tensor(x.reshape(shape)),
         )
         D[end_qry:n_queries] = d
 
@@ -284,6 +290,7 @@ class PointWiseAtt:
         tlabel: int,
         npix: float = 196,
         max_query: int = 1000,
+        snapshot_interval: int = 200,
     ) -> Tuple[np.ndarray, int, np.ndarray]:
         """Run multi-pixel PointWise attack (group-based).
 
@@ -311,8 +318,8 @@ class PointWiseAtt:
         n_queries = 0
         D = np.zeros(max_query + 500, dtype=int)
         d = compute_l0(
-            torch.from_numpy(oimg).cuda(),
-            torch.from_numpy(x.reshape(shape)).cuda(),
+            self._tensor(oimg),
+            self._tensor(x.reshape(shape)),
         )
         n_groups = N // npix
         snapshots = {}
@@ -345,8 +352,8 @@ class PointWiseAtt:
                     end_qry = n_queries
                     D[start_qry:end_qry] = d
                     d = compute_l0(
-                        torch.from_numpy(oimg).cuda(),
-                        torch.from_numpy(x.reshape(shape)).cuda(),
+                        self._tensor(oimg),
+                        self._tensor(x.reshape(shape)),
                     )
                     if self.verbose and n_queries % self.log_interval == 0:
                         print(
@@ -389,8 +396,8 @@ class PointWiseAtt:
                     end_qry = n_queries
                     D[start_qry:end_qry] = d
                     d = compute_l0(
-                        torch.from_numpy(oimg).cuda(),
-                        torch.from_numpy(x.reshape(shape)).cuda(),
+                        self._tensor(oimg),
+                        self._tensor(x.reshape(shape)),
                     )
                     improved = True
                 else:
@@ -408,8 +415,8 @@ class PointWiseAtt:
                         end_qry = n_queries
                         D[start_qry:end_qry] = d
                         d = compute_l0(
-                            torch.from_numpy(oimg).cuda(),
-                            torch.from_numpy(x.reshape(shape)).cuda(),
+                            self._tensor(oimg),
+                            self._tensor(x.reshape(shape)),
                         )
                         if n_queries % self.log_interval == 0:
                             print(
@@ -428,8 +435,8 @@ class PointWiseAtt:
 
         # Final L0
         d = compute_l0(
-            torch.from_numpy(oimg).cuda(),
-            torch.from_numpy(x.reshape(shape)).cuda(),
+            self._tensor(oimg),
+            self._tensor(x.reshape(shape)),
         )
         D[end_qry:n_queries] = d
 
@@ -473,8 +480,8 @@ class PointWiseAtt:
         n_queries = 0
         D = np.zeros(max_query + 500, dtype=int)
         d = compute_l0(
-            torch.from_numpy(oimg).cuda(),
-            torch.from_numpy(x.reshape(shape)).cuda(),
+            self._tensor(oimg),
+            self._tensor(x.reshape(shape)),
         )
         snapshots = {}
         next_snap_query = snapshot_interval
@@ -508,8 +515,8 @@ class PointWiseAtt:
                     end_qry = n_queries
                     D[start_qry:end_qry] = d
                     d = compute_l0(
-                        torch.from_numpy(oimg).cuda(),
-                        torch.from_numpy(x.reshape(shape)).cuda(),
+                        self._tensor(oimg),
+                        self._tensor(x.reshape(shape)),
                     )
                     if self.verbose and n_queries % self.log_interval == 0:
                         print(
@@ -520,7 +527,7 @@ class PointWiseAtt:
                     x[idx] = old_value
 
                 if n_queries >= next_snap_query:
-                    snapshots[next_snap_query] = torch.from_numpy(x.reshape(shape)).clone().float().cuda()
+                    snapshots[next_snap_query] = self._tensor(x.reshape(shape)).clone()
                     next_snap_query += snapshot_interval
 
                 if n_queries >= max_query:
@@ -563,8 +570,8 @@ class PointWiseAtt:
                     end_qry = n_queries
                     D[start_qry:end_qry] = d
                     d = compute_l0(
-                        torch.from_numpy(oimg).cuda(),
-                        torch.from_numpy(x.reshape(shape)).cuda(),
+                        self._tensor(oimg),
+                        self._tensor(x.reshape(shape)),
                     )
                     improved = True
                 else:
@@ -582,8 +589,8 @@ class PointWiseAtt:
                         end_qry = n_queries
                         D[start_qry:end_qry] = d
                         d = compute_l0(
-                            torch.from_numpy(oimg).cuda(),
-                            torch.from_numpy(x.reshape(shape)).cuda(),
+                            self._tensor(oimg),
+                            self._tensor(x.reshape(shape)),
                         )
                         if n_queries % self.log_interval == 0:
                             print(
@@ -594,7 +601,7 @@ class PointWiseAtt:
                         x[idx] = old_value
 
                 if n_queries >= next_snap_query:
-                    snapshots[next_snap_query] = torch.from_numpy(x.reshape(shape)).clone().float().cuda()
+                    snapshots[next_snap_query] = self._tensor(x.reshape(shape)).clone()
                     next_snap_query += snapshot_interval
 
                 if n_queries >= max_query:
@@ -606,8 +613,8 @@ class PointWiseAtt:
 
         # Final L0
         d = compute_l0(
-            torch.from_numpy(oimg).cuda(),
-            torch.from_numpy(x.reshape(shape)).cuda(),
+            self._tensor(oimg),
+            self._tensor(x.reshape(shape)),
         )
         D[end_qry:n_queries] = d
 

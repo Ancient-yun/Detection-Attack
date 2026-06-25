@@ -47,6 +47,8 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 .claude/
+.omo/
+.codegraph/
 
 # Translations
 *.mo
@@ -118,10 +120,15 @@ docs/modelzoo_statistics.md
 mmdet/.mim
 work_dirs/
 outputs/
+logs/
+specs/
 
 # Pytorch
 *.pth
+*.pt
 *.py~
 *.sh~
+ckpt/
+*.zip
 
 result/

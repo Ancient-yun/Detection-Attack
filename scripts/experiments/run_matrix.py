@@ -26,6 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--score-thr", type=float, default=None)
     parser.add_argument("--num-images", default=None)
+    parser.add_argument("--sample-strategy", choices=["first", "random"], default=None)
+    parser.add_argument("--sample-seed", type=int, default=None)
     parser.add_argument("--attacks", nargs="*", default=None)
     parser.add_argument("--targets", nargs="*", default=None)
     parser.add_argument("--python", default=sys.executable)
@@ -33,6 +35,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-skip-completed", action="store_true")
     parser.add_argument("--resume-partial", action="store_true", default=None)
     parser.add_argument("--no-resume-partial", dest="resume_partial", action="store_false")
+    parser.add_argument("--save-snapshots", dest="save_snapshots", action="store_true", default=None)
+    parser.add_argument("--no-save-snapshots", dest="save_snapshots", action="store_false")
+    parser.add_argument(
+        "--yolo-inference-mode",
+        choices=["legacy", "direct_tensor"],
+        default=None,
+    )
     return parser.parse_args()
 
 
@@ -46,7 +55,30 @@ def output_dir(root: Path, case: dict[str, Any], run_name: str | None) -> Path:
     return root / case["attack"] / case["dataset_name"] / case["model"] / (run_name or case["run_name"])
 
 
-def is_completed(out_dir: Path, score_thr: float, expected_images: int | None) -> bool:
+def resolve_save_snapshots(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    if args.save_snapshots is not None:
+        return bool(args.save_snapshots)
+    return bool(config.get("run", {}).get("save_snapshots", False))
+
+
+def has_final_image_artifacts(out_dir: Path) -> bool:
+    image_dir = out_dir / "images"
+    required = {"orig.png", "adv.png", "delta.png", "adv_raw.png", "result.txt"}
+    if not image_dir.is_dir():
+        return False
+    for per_image_dir in image_dir.iterdir():
+        if not per_image_dir.is_dir():
+            continue
+        if required.issubset({path.name for path in per_image_dir.iterdir()}):
+            return True
+    return False
+
+
+def is_completed(
+    out_dir: Path,
+    score_thr: float,
+    expected_images: int | None,
+) -> bool:
     report = out_dir / "experiment_report.txt"
     metrics = parse_report(report)
     if not metrics:
@@ -54,6 +86,8 @@ def is_completed(out_dir: Path, score_thr: float, expected_images: int | None) -
     if metrics.get("score_thr") != as_cli_value(score_thr):
         return False
     if expected_images is not None and metrics.get("total_images") != str(expected_images):
+        return False
+    if not has_final_image_artifacts(out_dir):
         return False
     return True
 
@@ -69,11 +103,28 @@ def build_command(
     if score_thr is None:
         score_thr = float(config.get("comparison", {}).get("target_score_thr", 0.5))
     num_images = args.num_images or case.get("num_images", defaults.get("num_images", "all"))
+    sample_strategy = (
+        args.sample_strategy
+        or case.get("sample_strategy")
+        or defaults.get("sample_strategy")
+    )
+    sample_seed = (
+        args.sample_seed
+        if args.sample_seed is not None
+        else case.get("sample_seed", defaults.get("sample_seed"))
+    )
 
     cmd = [args.python, "run_attack.py"]
     model_type = case.get("model_type", "mmdet")
     if model_type != "mmdet":
         cmd.extend(["--model-type", model_type])
+    yolo_inference_mode = (
+        args.yolo_inference_mode
+        or case.get("yolo_inference_mode")
+        or defaults.get("yolo_inference_mode")
+    )
+    if model_type == "yolov8" and yolo_inference_mode:
+        cmd.extend(["--yolo-inference-mode", as_cli_value(yolo_inference_mode)])
     if case.get("config"):
         cmd.extend(["--config", case["config"]])
     cmd.extend(
@@ -108,11 +159,17 @@ def build_command(
             str(out_dir),
         ]
     )
+    if sample_strategy:
+        cmd.extend(["--sample-strategy", as_cli_value(sample_strategy)])
+    if sample_seed is not None:
+        cmd.extend(["--sample-seed", as_cli_value(sample_seed)])
     resume_partial = args.resume_partial
     if resume_partial is None:
         resume_partial = config.get("run", {}).get("resume_partial", False)
     if resume_partial:
         cmd.append("--resume-partial")
+    if resolve_save_snapshots(args, config):
+        cmd.append("--save-snapshots")
 
     for key, value in case.get("attack_params", {}).items():
         cmd.extend([f"--{key.replace('_', '-')}", as_cli_value(value)])
