@@ -5,11 +5,13 @@ interface that SparseEvo and PointWise attacks expect.
 """
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import warnings
 from typing import Dict, Optional, Tuple
 
-from mmdet.apis import init_detector, inference_detector
+from mmdet.apis import init_detector
+from mmdet.structures import DetDataSample
 
 from .metrics import match_detections
 
@@ -64,21 +66,81 @@ class MMDetModelAdapter:
         self._ref_labels = None
         self._ref_label_int = 0  # Dummy label for predict_label compatibility
 
-        # Get model input size from config
-        self._img_size = self._get_input_size()
+        # Tensor-only inference settings. Inputs are RGB float tensors in [0, 1].
+        self._resize_scale, self._keep_ratio = self._get_resize_info()
+        self._img_size = self._resize_scale
+        self._mean, self._std = self._get_normalize_tensors()
+        self.outputs_original_size = True
 
-    def _get_input_size(self) -> Tuple[int, int]:
-        """Extract expected input size from model config."""
+    def _get_resize_info(self) -> Tuple[Tuple[int, int], bool]:
+        """Extract test-time resize settings from the model config."""
         cfg = self.model.cfg
         try:
             test_pipeline = cfg.test_dataloader.dataset.pipeline
             for transform in test_pipeline:
-                if transform.get('type') in ('Resize',):
+                if transform.get('type') in ('Resize', 'FixScaleResize'):
                     scale = transform.get('scale', (640, 640))
-                    return tuple(scale)
+                    keep_ratio = transform.get('keep_ratio', False)
+                    return tuple(scale), bool(keep_ratio)
         except Exception:
             pass
-        return (640, 640)
+        return (640, 640), False
+
+    def _get_normalize_tensors(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build RGB [0, 1] normalization tensors from config mean/std."""
+        data_preprocessor = self.model.cfg.model.get('data_preprocessor', {})
+        mean = data_preprocessor.get('mean', [0.0, 0.0, 0.0])
+        std = data_preprocessor.get('std', [255.0, 255.0, 255.0])
+        mean = torch.tensor(mean, device=self.device, dtype=torch.float32)
+        std = torch.tensor(std, device=self.device, dtype=torch.float32)
+        mean = (mean / 255.0).view(1, -1, 1, 1)
+        std = (std / 255.0).view(1, -1, 1, 1)
+        return mean, std
+
+    def _rescale_size(self, h: int, w: int) -> Tuple[int, int]:
+        """Compute keep-ratio resize size using MMDetection scale semantics."""
+        target_w, target_h = self._resize_scale
+        if self._keep_ratio:
+            scale = min(max(target_w, target_h) / max(h, w),
+                        min(target_w, target_h) / min(h, w))
+            new_w = max(1, int(w * float(scale) + 0.5))
+            new_h = max(1, int(h * float(scale) + 0.5))
+        else:
+            new_w, new_h = target_w, target_h
+        return new_h, new_w
+
+    def _preprocess_tensor(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, DetDataSample]:
+        """Resize and normalize an RGB [0, 1] tensor for direct prediction."""
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        if x.size(0) != 1:
+            raise ValueError("MMDetModelAdapter only supports batch size 1.")
+
+        x = x.to(device=self.device, dtype=torch.float32).clamp(0, 1)
+        _, _, orig_h, orig_w = x.shape
+        new_h, new_w = self._rescale_size(orig_h, orig_w)
+
+        if (new_h, new_w) != (orig_h, orig_w):
+            x = F.interpolate(
+                x, size=(new_h, new_w), mode='bilinear',
+                align_corners=False,
+            )
+
+        x = (x - self._mean) / self._std
+
+        data_sample = DetDataSample()
+        data_sample.set_metainfo({
+            'img_id': 0,
+            'img_path': None,
+            'ori_shape': (orig_h, orig_w),
+            'img_shape': (new_h, new_w),
+            'scale_factor': (new_w / orig_w, new_h / orig_h),
+            'batch_input_shape': (new_h, new_w),
+            'pad_shape': (new_h, new_w),
+        })
+        return x.contiguous(), data_sample
 
     def _tensor_to_numpy_img(self, x: torch.Tensor) -> np.ndarray:
         """Convert [1, C, H, W] tensor in [0,1] range to [H, W, C] uint8 BGR.
@@ -112,10 +174,14 @@ class MMDetModelAdapter:
                 - 'labels': np.ndarray [N] (class indices)
                 - 'scores': np.ndarray [N] (confidence scores)
         """
-        img_np = self._tensor_to_numpy_img(x)
+        inputs, data_sample = self._preprocess_tensor(x)
 
         with torch.no_grad():
-            result = inference_detector(self.model, img_np)
+            result = self.model(
+                inputs,
+                data_samples=[data_sample],
+                mode='predict',
+            )[0]
 
         pred_instances = result.pred_instances
 

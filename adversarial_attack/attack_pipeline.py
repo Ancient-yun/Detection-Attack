@@ -67,6 +67,7 @@ class DetectionAttackPipeline:
         self.attack_method = attack_method
         self.verbose = True
         self.device = device
+        self.model_type = model_type
         self.success_thr = success_thr
         self.log_interval = log_interval
 
@@ -124,15 +125,18 @@ class DetectionAttackPipeline:
         if img is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
 
-        # Resize to model input size
-        h, w = self.model._img_size
-        img = cv2.resize(img, (w, h))
+        # MMDetection resizing now happens once inside the tensor-only adapter.
+        # Keep the legacy fixed-size image for YOLO, whose adapter handles its
+        # own preprocessing through the Ultralytics API.
+        if self.model_type == 'yolov8':
+            h, w = self.model._img_size
+            img = cv2.resize(img, (w, h))
 
         # BGR → RGB, [0,255] → [0,1], HWC → CHW
         img = img[:, :, ::-1].copy()
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))
-        tensor = torch.from_numpy(img).unsqueeze(0).float().cuda()
+        tensor = torch.from_numpy(img).unsqueeze(0).float().to(self.device)
         return tensor
 
     def generate_starting_point(
@@ -167,7 +171,7 @@ class DetectionAttackPipeline:
         for scale in scales:
             # Generate block-wise random noise
             sh, sw = h // scale, w // scale
-            noise = torch.rand(1, c, sh, sw).cuda()
+            noise = torch.rand(1, c, sh, sw, device=oimg.device)
 
             # Upscale to original size
             if scale > 1:
@@ -191,7 +195,7 @@ class DetectionAttackPipeline:
 
         # Fallback: pure random image
         for _ in range(100):
-            noise = torch.rand_like(oimg).cuda()
+            noise = torch.rand_like(oimg)
             n_queries += 1
             pred = self.model.predict_label(noise)
             if pred != olabel:
@@ -204,7 +208,7 @@ class DetectionAttackPipeline:
 
         if self.verbose:
             print("[Pipeline] WARNING: Could not find adversarial starting point")
-        return torch.rand_like(oimg).cuda(), n_queries
+        return torch.rand_like(oimg), n_queries
 
     def run_attack(
         self,
@@ -567,26 +571,43 @@ class DetectionAttackPipeline:
             # Convert tensors to BGR images
             orig_img = cv2.imread(r['image_path'])
             scale_x, scale_y = 1.0, 1.0
-            
-            if orig_img is not None:
-                orig_h, orig_w = orig_img.shape[:2]
-                model_h, model_w = self.model._img_size
-                scale_x = orig_w / model_w
-                scale_y = orig_h / model_h
-                orig_bgr = cv2.resize(orig_img, (model_w, model_h))
-            else:
-                orig_bgr = self._tensor_to_bgr(
-                    self.load_image(r['image_path'])
-                )
-            adv_bgr = self._tensor_to_bgr(r['adv_image'])
 
-            # Upscale for orig and adv visual images
-            if orig_img is not None:
-                orig_bgr_up = cv2.resize(orig_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-                adv_bgr_up = cv2.resize(adv_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+            if getattr(self.model, 'outputs_original_size', False):
+                if orig_img is not None:
+                    orig_bgr_up = orig_img
+                else:
+                    orig_bgr_up = self._tensor_to_bgr(
+                        self.load_image(r['image_path'])
+                    )
+                adv_bgr_up = self._tensor_to_bgr(r['adv_image'])
+                if adv_bgr_up.shape[:2] != orig_bgr_up.shape[:2]:
+                    adv_bgr_up = cv2.resize(
+                        adv_bgr_up,
+                        (orig_bgr_up.shape[1], orig_bgr_up.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                orig_bgr = orig_bgr_up
+                adv_bgr = adv_bgr_up
             else:
-                orig_bgr_up = orig_bgr.copy()
-                adv_bgr_up = adv_bgr.copy()
+                if orig_img is not None:
+                    orig_h, orig_w = orig_img.shape[:2]
+                    model_h, model_w = self.model._img_size
+                    scale_x = orig_w / model_w
+                    scale_y = orig_h / model_h
+                    orig_bgr = cv2.resize(orig_img, (model_w, model_h))
+                else:
+                    orig_bgr = self._tensor_to_bgr(
+                        self.load_image(r['image_path'])
+                    )
+                adv_bgr = self._tensor_to_bgr(r['adv_image'])
+
+                # Upscale for orig and adv visual images
+                if orig_img is not None:
+                    orig_bgr_up = cv2.resize(orig_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                    adv_bgr_up = cv2.resize(adv_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                else:
+                    orig_bgr_up = orig_bgr.copy()
+                    adv_bgr_up = adv_bgr.copy()
 
             # Draw bboxes (on the ORIGINAL upscaled images)
             orig_vis = self._draw_detections(
@@ -807,8 +828,19 @@ class DetectionAttackPipeline:
             Dict with orig_mAP, adv_mAP, per_class_ap, mAP_drop.
         """
         n_classes = len(self.model.classes)
+        outputs_original_size = getattr(self.model, 'outputs_original_size', False)
         model_h, model_w = self.model._img_size
         file_to_anns = {}
+        result_image_sizes = {}
+
+        if outputs_original_size:
+            for r in results:
+                base_name = os.path.splitext(
+                    os.path.basename(r['image_path'])
+                )[0]
+                img = cv2.imread(r['image_path'])
+                if img is not None:
+                    result_image_sizes[base_name] = img.shape[:2]
 
         if os.path.isdir(ann_file):
             # Assume YOLO format directory (e.g., labels/val)
@@ -825,14 +857,17 @@ class DetectionAttackPipeline:
                         if len(parts) >= 5:
                             cls_id = int(parts[0])
                             xc, yc, w, h = map(float, parts[1:5])
+                            if outputs_original_size and base_name in result_image_sizes:
+                                target_h, target_w = result_image_sizes[base_name]
+                            else:
+                                target_h, target_w = model_h, model_w
 
-                            # YOLO matches: box bounds in [0, 1] normalized scale
-                            # Convert directly to model_w, model_h coordinates since gt_map
-                            # uses model_w/model_h coordinate space inside eval_map
-                            x1 = (xc - w / 2) * model_w
-                            y1 = (yc - h / 2) * model_h
-                            x2 = (xc + w / 2) * model_w
-                            y2 = (yc + h / 2) * model_h
+                            # YOLO labels are normalized to the active
+                            # evaluation coordinate space.
+                            x1 = (xc - w / 2) * target_w
+                            y1 = (yc - h / 2) * target_h
+                            x2 = (xc + w / 2) * target_w
+                            y2 = (yc + h / 2) * target_h
 
                             file_to_anns[base_name]['bboxes'].append([x1, y1, x2, y2])
                             file_to_anns[base_name]['labels'].append(cls_id)
@@ -862,17 +897,22 @@ class DetectionAttackPipeline:
                 # COCO bbox: [x, y, w, h] -> [x1, y1, x2, y2]
                 x, y, w, h = ann['bbox']
 
-                # Scale from orig size directly to model input size here
-                orig_h, orig_w = img_id_to_size[ann['image_id']]
-                scale_x = model_w / orig_w
-                scale_y = model_h / orig_h
+                if outputs_original_size:
+                    file_to_anns[base_name]['bboxes'].append([
+                        x, y, x + w, y + h
+                    ])
+                else:
+                    # Scale from orig size directly to model input size here.
+                    orig_h, orig_w = img_id_to_size[ann['image_id']]
+                    scale_x = model_w / orig_w
+                    scale_y = model_h / orig_h
 
-                file_to_anns[base_name]['bboxes'].append([
-                    x * scale_x,
-                    y * scale_y,
-                    (x + w) * scale_x,
-                    (y + h) * scale_y
-                ])
+                    file_to_anns[base_name]['bboxes'].append([
+                        x * scale_x,
+                        y * scale_y,
+                        (x + w) * scale_x,
+                        (y + h) * scale_y
+                    ])
                 file_to_anns[base_name]['labels'].append(cat_id_to_idx[ann['category_id']])
 
         annotations = []
