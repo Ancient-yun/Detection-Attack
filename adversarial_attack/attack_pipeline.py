@@ -74,6 +74,7 @@ class DetectionAttackPipeline:
         self.attack_method = attack_method
         self.verbose = True
         self.device = device
+        self.model_type = model_type
         self.success_thr = success_thr
         self.log_interval = log_interval
 
@@ -136,15 +137,18 @@ class DetectionAttackPipeline:
         if img is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
 
-        # Resize to model input size
-        h, w = self.model._img_size
-        img = cv2.resize(img, (w, h))
+        # MMDetection resizing now happens once inside the tensor-only adapter.
+        # Keep the legacy fixed-size image for YOLO, whose adapter handles its
+        # own preprocessing through the Ultralytics API.
+        if self.model_type == 'yolov8':
+            h, w = self.model._img_size
+            img = cv2.resize(img, (w, h))
 
         # BGR → RGB, [0,255] → [0,1], HWC → CHW
         img = img[:, :, ::-1].copy()
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))
-        tensor = torch.from_numpy(img).unsqueeze(0).float().to(self._target_device())
+        tensor = torch.from_numpy(img).unsqueeze(0).float().to(self.device)
         return tensor
 
     def generate_starting_point(
@@ -179,7 +183,7 @@ class DetectionAttackPipeline:
         for scale in scales:
             # Generate block-wise random noise
             sh, sw = h // scale, w // scale
-            noise = torch.rand(1, c, sh, sw, dtype=oimg.dtype, device=oimg.device)
+            noise = torch.rand(1, c, sh, sw, device=oimg.device)
 
             # Upscale to original size
             if scale > 1:
@@ -489,13 +493,208 @@ class DetectionAttackPipeline:
         ann_file: str = None,
         save_snapshots: bool = False,
     ) -> None:
-        save_attack_results(
-            self,
-            results,
-            output_dir,
-            ann_file,
-            save_snapshots=save_snapshots,
-        )
+        """Save attack results to disk.
+
+        Saves:
+        - Original image with bboxes
+        - Adversarial image with bboxes
+        - Delta image (pixel difference heatmap)
+        - Raw adversarial image
+        - Summary CSV with per-image metrics
+
+        Args:
+            results: List of result dicts from run_attack.
+            output_dir: Output directory path.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Save CSV summary
+        csv_path = os.path.join(output_dir, f"attack_results_{timestamp}.csv")
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'image_path', 'n_queries', 'l0_distance', 'sparsity_ratio',
+                'total_bboxes', 'survived', 'disappeared',
+                'misclassified', 'success_rate',
+            ])
+            for r in results:
+                writer.writerow([
+                    r['image_path'],
+                    r['n_queries'],
+                    r['l0_distance'],
+                    f"{r['sparsity_ratio']:.6f}",
+                    r['match_result']['total'],
+                    r['match_result']['survived'],
+                    r['match_result']['disappeared'],
+                    r['match_result']['misclassified'],
+                    f"{r['success_rate']:.4f}",
+                ])
+
+        # Save images with bbox visualization
+        img_dir = os.path.join(output_dir, 'images')
+        os.makedirs(img_dir, exist_ok=True)
+
+        for r in results:
+            basename = os.path.splitext(
+                os.path.basename(r['image_path'])
+            )[0]
+
+            # Create per-image subdirectory: images/이미지이름/
+            per_img_dir = os.path.join(img_dir, basename)
+            os.makedirs(per_img_dir, exist_ok=True)
+
+            orig_dets = r['orig_detections']
+            adv_dets = r['adv_detections']
+            match = r['match_result']
+
+            # Convert tensors to BGR images
+            orig_img = cv2.imread(r['image_path'])
+            scale_x, scale_y = 1.0, 1.0
+
+            if getattr(self.model, 'outputs_original_size', False):
+                if orig_img is not None:
+                    orig_bgr_up = orig_img
+                else:
+                    orig_bgr_up = self._tensor_to_bgr(
+                        self.load_image(r['image_path'])
+                    )
+                adv_bgr_up = self._tensor_to_bgr(r['adv_image'])
+                if adv_bgr_up.shape[:2] != orig_bgr_up.shape[:2]:
+                    adv_bgr_up = cv2.resize(
+                        adv_bgr_up,
+                        (orig_bgr_up.shape[1], orig_bgr_up.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                orig_bgr = orig_bgr_up
+                adv_bgr = adv_bgr_up
+            else:
+                if orig_img is not None:
+                    orig_h, orig_w = orig_img.shape[:2]
+                    model_h, model_w = self.model._img_size
+                    scale_x = orig_w / model_w
+                    scale_y = orig_h / model_h
+                    orig_bgr = cv2.resize(orig_img, (model_w, model_h))
+                else:
+                    orig_bgr = self._tensor_to_bgr(
+                        self.load_image(r['image_path'])
+                    )
+                adv_bgr = self._tensor_to_bgr(r['adv_image'])
+
+                # Upscale for orig and adv visual images
+                if orig_img is not None:
+                    orig_bgr_up = cv2.resize(orig_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                    adv_bgr_up = cv2.resize(adv_bgr, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                else:
+                    orig_bgr_up = orig_bgr.copy()
+                    adv_bgr_up = adv_bgr.copy()
+
+            # Draw bboxes (on the ORIGINAL upscaled images)
+            orig_vis = self._draw_detections(
+                orig_bgr_up, orig_dets['bboxes'], orig_dets['labels'],
+                orig_dets['scores'], self.model.classes,
+                scale_x=scale_x, scale_y=scale_y
+            )
+            adv_vis = self._draw_detections(
+                adv_bgr_up, adv_dets['bboxes'], adv_dets['labels'],
+                adv_dets['scores'], self.model.classes,
+                scale_x=scale_x, scale_y=scale_y
+            )
+
+            # Save individual images into per-image subdirectory
+            cv2.imwrite(
+                os.path.join(per_img_dir, "orig.png"),
+                orig_vis,
+            )
+            cv2.imwrite(
+                os.path.join(per_img_dir, "adv.png"),
+                adv_vis,
+            )
+
+            # Save delta image (pixel difference heatmap)
+            delta = cv2.absdiff(orig_bgr, adv_bgr)
+            # Amplify for visibility: scale to full [0, 255] range
+            delta_max = delta.max()
+            if delta_max > 0:
+                delta_vis = (delta.astype(np.float32) / delta_max * 255).astype(np.uint8)
+            else:
+                delta_vis = delta
+            cv2.imwrite(
+                os.path.join(per_img_dir, "delta.png"),
+                delta_vis,
+            )
+
+            # Save raw adversarial image (no bboxes)
+            cv2.imwrite(
+                os.path.join(per_img_dir, "adv_raw.png"),
+                adv_bgr,
+            )
+
+            # Save snapshot images at query intervals
+            snapshots = r.get('snapshots', {})
+            if snapshots:
+                for query_num, snap_tensor in sorted(snapshots.items()):
+                    snap_bgr = self._tensor_to_bgr(snap_tensor)
+                    snap_dets = self.model.predict(snap_tensor)
+                    snap_vis = self._draw_detections(
+                        snap_bgr, snap_dets['bboxes'], snap_dets['labels'],
+                        snap_dets['scores'], self.model.classes,
+                    )
+                    cv2.imwrite(
+                        os.path.join(per_img_dir, f"query_{query_num}.png"),
+                        snap_vis,
+                    )
+
+            # Save per-image result text file
+            txt_path = os.path.join(per_img_dir, "result.txt")
+            with open(txt_path, 'w') as f:
+                f.write(f"Image: {r['image_path']}\n")
+                f.write(f"Queries used: {r['n_queries']}\n")
+                f.write(f"L0 distance: {r['l0_distance']}\n")
+                f.write(f"Sparsity ratio: {r['sparsity_ratio']:.6f} ({r['sparsity_ratio']:.2%})\n")
+                f.write(f"\n--- Detection Results ---\n")
+                f.write(f"Original bboxes: {match['total']}\n")
+                f.write(f"Survived: {match['survived']}\n")
+                f.write(f"Disappeared: {match['disappeared']}\n")
+                f.write(f"Misclassified: {match['misclassified']}\n")
+                f.write(f"Attack success rate: {r['success_rate']:.4f} ({r['success_rate']:.2%})\n")
+                f.write(f"Attack result: {'SUCCEEDED' if r['is_successful'] else 'FAILED'}\n")
+                
+                # Compute single-image mAP
+                b_map = self.compute_benign_map([r], iou_thr=self.model.iou_thr, verbose=False)
+                f.write(f"\n--- Benign mAP (IoU={self.model.iou_thr}) ---\n")
+                f.write(f"  Orig: {b_map['orig_mAP']:.4f}\n")
+                f.write(f"  Adv : {b_map['adv_mAP']:.4f}\n")
+                f.write(f"  Drop: {b_map['mAP_drop']:.4f}\n")
+                
+                if ann_file:
+                    gt_map = self.compute_gt_map([r], ann_file, iou_thr=self.model.iou_thr, verbose=False)
+                    f.write(f"\n--- GT mAP (IoU={self.model.iou_thr}) ---\n")
+                    f.write(f"  Orig: {gt_map['orig_mAP']:.4f}\n")
+                    f.write(f"  Adv : {gt_map['adv_mAP']:.4f}\n")
+                    f.write(f"  Drop: {gt_map['mAP_drop']:.4f}\n")
+
+                f.write(f"\n--- Original Detections ---\n")
+                for i, (bbox, label, score) in enumerate(
+                    zip(orig_dets['bboxes'], orig_dets['labels'], orig_dets['scores'])
+                ):
+                    cls_name = self.model.classes[label] if label < len(self.model.classes) else f'cls_{label}'
+                    f.write(f"  [{i}] {cls_name}: bbox={bbox.astype(int).tolist()}, score={score:.4f}\n")
+                f.write(f"\n--- Adversarial Detections ---\n")
+                for i, (bbox, label, score) in enumerate(
+                    zip(adv_dets['bboxes'], adv_dets['labels'], adv_dets['scores'])
+                ):
+                    cls_name = self.model.classes[label] if label < len(self.model.classes) else f'cls_{label}'
+                    f.write(f"  [{i}] {cls_name}: bbox={bbox.astype(int).tolist()}, score={score:.4f}\n")
+                if snapshots:
+                    f.write(f"\n--- Snapshots ---\n")
+                    for query_num in sorted(snapshots.keys()):
+                        f.write(f"  query_{query_num}.png\n")
+
+        print(f"[Pipeline] Results saved to {output_dir}")
+        print(f"  CSV: {csv_path}")
+        print(f"  Images: {img_dir}")
+        print(f"  (orig / adv / delta / adv_raw / snapshots / result.txt per image subdirectory)")
 
     def _dets_to_eval_format(
         self,
@@ -519,4 +718,156 @@ class DetectionAttackPipeline:
         iou_thr: float = 0.5,
         verbose: bool = True,
     ) -> Dict:
-        return evaluate_gt_map(self.model, results, ann_file, iou_thr, verbose)
+        """Compute mAP using real GT annotations.
+
+        Measures actual detection performance before/after attack
+        against ground truth labels (COCO JSON or YOLO format directory).
+
+        Args:
+            results: List of result dicts from run_attack.
+            ann_file: Path to COCO annotation JSON or YOLO txt dir.
+            iou_thr: IoU threshold for mAP evaluation.
+
+        Returns:
+            Dict with orig_mAP, adv_mAP, per_class_ap, mAP_drop.
+        """
+        n_classes = len(self.model.classes)
+        outputs_original_size = getattr(self.model, 'outputs_original_size', False)
+        model_h, model_w = self.model._img_size
+        file_to_anns = {}
+        result_image_sizes = {}
+
+        if outputs_original_size:
+            for r in results:
+                base_name = os.path.splitext(
+                    os.path.basename(r['image_path'])
+                )[0]
+                img = cv2.imread(r['image_path'])
+                if img is not None:
+                    result_image_sizes[base_name] = img.shape[:2]
+
+        if os.path.isdir(ann_file):
+            # Assume YOLO format directory (e.g., labels/val)
+            for txt_name in os.listdir(ann_file):
+                if not txt_name.endswith('.txt'):
+                    continue
+                base_name = os.path.splitext(txt_name)[0]
+                file_to_anns[base_name] = {'bboxes': [], 'labels': []}
+
+                txt_path = os.path.join(ann_file, txt_name)
+                with open(txt_path, 'r') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 5:
+                            cls_id = int(parts[0])
+                            xc, yc, w, h = map(float, parts[1:5])
+                            if outputs_original_size and base_name in result_image_sizes:
+                                target_h, target_w = result_image_sizes[base_name]
+                            else:
+                                target_h, target_w = model_h, model_w
+
+                            # YOLO labels are normalized to the active
+                            # evaluation coordinate space.
+                            x1 = (xc - w / 2) * target_w
+                            y1 = (yc - h / 2) * target_h
+                            x2 = (xc + w / 2) * target_w
+                            y2 = (yc + h / 2) * target_h
+
+                            file_to_anns[base_name]['bboxes'].append([x1, y1, x2, y2])
+                            file_to_anns[base_name]['labels'].append(cls_id)
+        else:
+            # Assume COCO JSON
+            with open(ann_file, 'r') as f:
+                coco_data = json.load(f)
+
+            # Build category_id -> contiguous index mapping
+            cat_ids = sorted([c['id'] for c in coco_data['categories']])
+            cat_id_to_idx = {cid: i for i, cid in enumerate(cat_ids)}
+
+            img_id_to_file = {
+                img['id']: img['file_name'] for img in coco_data['images']
+            }
+            img_id_to_size = {
+                img['id']: (img['height'], img['width']) for img in coco_data['images']
+            }
+            for ann in coco_data['annotations']:
+                if ann.get('iscrowd', 0):
+                    continue
+                fname = img_id_to_file[ann['image_id']]
+                base_name = os.path.splitext(os.path.basename(fname))[0]
+                if base_name not in file_to_anns:
+                    file_to_anns[base_name] = {'bboxes': [], 'labels': []}
+
+                # COCO bbox: [x, y, w, h] -> [x1, y1, x2, y2]
+                x, y, w, h = ann['bbox']
+
+                if outputs_original_size:
+                    file_to_anns[base_name]['bboxes'].append([
+                        x, y, x + w, y + h
+                    ])
+                else:
+                    # Scale from orig size directly to model input size here.
+                    orig_h, orig_w = img_id_to_size[ann['image_id']]
+                    scale_x = model_w / orig_w
+                    scale_y = model_h / orig_h
+
+                    file_to_anns[base_name]['bboxes'].append([
+                        x * scale_x,
+                        y * scale_y,
+                        (x + w) * scale_x,
+                        (y + h) * scale_y
+                    ])
+                file_to_anns[base_name]['labels'].append(cat_id_to_idx[ann['category_id']])
+
+        annotations = []
+        orig_det_results = []
+        adv_det_results = []
+
+        for r in results:
+            fname = os.path.basename(r['image_path'])
+            base_name = os.path.splitext(fname)[0]
+            orig_dets = r['orig_detections']
+            adv_dets = r['adv_detections']
+
+            if base_name in file_to_anns:
+                gt_bboxes = np.array(file_to_anns[base_name]['bboxes'], dtype=np.float32)
+                gt_labels = np.array(file_to_anns[base_name]['labels'], dtype=np.int64)
+            else:
+                gt_bboxes = np.zeros((0, 4), dtype=np.float32)
+                gt_labels = np.zeros((0,), dtype=np.int64)
+
+            annotations.append({
+                'bboxes': gt_bboxes,
+                'labels': gt_labels,
+            })
+            orig_det_results.append(self._dets_to_eval_format(orig_dets, n_classes))
+            adv_det_results.append(self._dets_to_eval_format(adv_dets, n_classes))
+
+        orig_mAP, _ = eval_map(
+            orig_det_results, annotations,
+            iou_thr=iou_thr, logger='silent',
+        )
+        adv_mAP, adv_details = eval_map(
+            adv_det_results, annotations,
+            iou_thr=iou_thr, logger='silent',
+        )
+
+        per_class_ap = [
+            d['ap'].item() if d['ap'].size > 0 else 0.0
+            for d in adv_details
+        ]
+
+        result = {
+            'orig_mAP': float(orig_mAP),
+            'adv_mAP': float(adv_mAP),
+            'per_class_ap': per_class_ap,
+            'mAP_drop': float(orig_mAP - adv_mAP),
+        }
+
+        if verbose:
+            print(f"\n[Pipeline] === GT mAP (IoU={iou_thr}) ===")
+            print(f"  GT orig mAP : {orig_mAP:.4f}")
+            print(f"  GT adv mAP  : {adv_mAP:.4f}")
+            print(f"  mAP Drop    : {result['mAP_drop']:.4f}")
+
+        return result
