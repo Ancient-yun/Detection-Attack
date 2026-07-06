@@ -4,22 +4,22 @@ Orchestrates the full attack flow: load model, load image,
 generate starting point, run attack, evaluate results.
 """
 
-import os
-import json
 import torch
 import numpy as np
 import cv2
-import csv
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
-
-from mmdet.evaluation.functional import eval_map
 
 from .model_adapter import MMDetModelAdapter, Yolov8ModelAdapter
 from .sparse_evo import SpaEvoAtt
 from .pointwise import PointWiseAtt
 from .metrics import compute_l0, match_detections
+from .evaluation import (
+    compute_benign_map as evaluate_benign_map,
+    compute_gt_map as evaluate_gt_map,
+    dets_to_eval_format,
+)
+from .result_writer import draw_detections, save_attack_results, tensor_to_bgr
 
 
 class DetectionAttackPipeline:
@@ -38,6 +38,11 @@ class DetectionAttackPipeline:
         iou_thr: IoU threshold for attack success matching.
         success_thr: Minimum success rate to declare attack successful.
         log_interval: Print progress every N queries.
+        mmdet_inference_mode: MMDetection inference path. 'legacy' uses
+            inference_detector; 'direct_tensor' avoids CPU image conversion.
+        yolo_inference_mode: YOLOv8 inference path. 'legacy' preserves
+            Ultralytics high-level prediction semantics; 'direct_tensor'
+            avoids CPU image conversion but is not bitwise-equivalent.
         attack_kwargs: Additional kwargs for the attack class.
     """
 
@@ -56,6 +61,8 @@ class DetectionAttackPipeline:
         iou_thr: float = 0.5,
         success_thr: float = 0.5,
         log_interval: int = 50,
+        mmdet_inference_mode: str = 'legacy',
+        yolo_inference_mode: str = 'legacy',
         **attack_kwargs,
     ):
         if attack_method not in self.SUPPORTED_ATTACKS:
@@ -78,12 +85,14 @@ class DetectionAttackPipeline:
                 config_path, checkpoint_path,
                 device=device, score_thr=score_thr, iou_thr=iou_thr,
                 success_thr=success_thr,
+                inference_mode=mmdet_inference_mode,
             )
         elif model_type == 'yolov8':
             self.model = Yolov8ModelAdapter(
                 checkpoint_path,
                 device=device, score_thr=score_thr, iou_thr=iou_thr,
                 success_thr=success_thr,
+                inference_mode=yolo_inference_mode,
             )
         else:
             raise ValueError(f"Unsupported model_type: {model_type}")
@@ -112,6 +121,9 @@ class DetectionAttackPipeline:
 
         self.attack_kwargs = attack_kwargs
 
+    def _target_device(self) -> torch.device:
+        return torch.device(getattr(self.model, "device", self.device))
+
     def load_image(self, image_path: str) -> torch.Tensor:
         """Load image and convert to [1, C, H, W] tensor in [0, 1].
 
@@ -119,7 +131,7 @@ class DetectionAttackPipeline:
             image_path: Path to the image file.
 
         Returns:
-            Image tensor [1, 3, H, W], float, in [0, 1], on CUDA.
+            Image tensor [1, 3, H, W], float, in [0, 1].
         """
         img = cv2.imread(image_path)
         if img is None:
@@ -314,7 +326,7 @@ class DetectionAttackPipeline:
             snapshots.update(pw_snaps)
             adv_img = torch.from_numpy(
                 adv_flat.reshape(oimg.shape)
-            ).float().cuda()
+            ).float().to(oimg.device)
         elif self.attack_method == 'pointwise_multi':
             oimg_np = oimg.cpu().numpy()
             timg_np = start_img.cpu().numpy()
@@ -328,7 +340,7 @@ class DetectionAttackPipeline:
             snapshots.update(pw_snaps)
             adv_img = torch.from_numpy(
                 adv_flat.reshape(oimg.shape)
-            ).float().cuda()
+            ).float().to(oimg.device)
         elif self.attack_method == 'pointwise_multi_sched':
             oimg_np = oimg.cpu().numpy()
             timg_np = start_img.cpu().numpy()
@@ -342,7 +354,7 @@ class DetectionAttackPipeline:
             snapshots.update(pw_snaps)
             adv_img = torch.from_numpy(
                 adv_flat.reshape(oimg.shape)
-            ).float().cuda()
+            ).float().to(oimg.device)
 
         total_queries += attack_queries
 
@@ -461,57 +473,25 @@ class DetectionAttackPipeline:
         scale_x: float = 1.0,
         scale_y: float = 1.0,
     ) -> np.ndarray:
-        """Draw bounding boxes and labels on an image.
-
-        Args:
-            img_bgr: BGR image [H, W, 3], uint8.
-            bboxes: Bboxes [N, 4].
-            labels: Class labels [N].
-            scores: Confidence scores [N].
-            classes: List of class names.
-
-        Returns:
-            Image with bboxes drawn (copy).
-        """
-        vis = img_bgr.copy()
-        colors = [
-            (0, 255, 0), (255, 0, 0), (0, 0, 255),
-            (255, 255, 0), (0, 255, 255), (255, 0, 255),
-            (128, 255, 0), (255, 128, 0), (0, 128, 255),
-        ]
-
-        for i, (bbox, label, score) in enumerate(
-            zip(bboxes, labels, scores)
-        ):
-            color = colors[int(label) % len(colors)]
-            x1 = int(bbox[0] * scale_x)
-            y1 = int(bbox[1] * scale_y)
-            x2 = int(bbox[2] * scale_x)
-            y2 = int(bbox[3] * scale_y)
-            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-
-            cls_name = classes[label] if label < len(classes) else f'cls_{label}'
-            text = f'{cls_name} {score:.2f}'
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-            cv2.rectangle(vis, (x1, y1 - th - 4), (x1 + tw, y1), color, -1)
-            cv2.putText(vis, text, (x1, y1 - 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
-        return vis
+        return draw_detections(
+            img_bgr,
+            bboxes,
+            labels,
+            scores,
+            classes,
+            scale_x=scale_x,
+            scale_y=scale_y,
+        )
 
     def _tensor_to_bgr(self, tensor: torch.Tensor) -> np.ndarray:
-        """Convert [1, C, H, W] tensor in [0,1] to BGR uint8 [H, W, 3]."""
-        if tensor.dim() == 4:
-            tensor = tensor[0]
-        img = tensor.detach().cpu().numpy().transpose(1, 2, 0)
-        img = (img * 255).clip(0, 255).astype(np.uint8)
-        return img[:, :, ::-1].copy()
+        return tensor_to_bgr(tensor)
 
     def save_results(
         self,
         results: List[Dict],
         output_dir: str,
         ann_file: str = None,
+        save_snapshots: bool = False,
     ) -> None:
         """Save attack results to disk.
 
@@ -721,27 +701,7 @@ class DetectionAttackPipeline:
         dets: Dict[str, np.ndarray],
         n_classes: int,
     ) -> List[np.ndarray]:
-        """Convert detection dict to eval_map per-class format.
-
-        Args:
-            dets: Dict with 'bboxes', 'labels', 'scores'.
-            n_classes: Number of classes.
-
-        Returns:
-            List of ndarray (n, 5) per class.
-        """
-        per_class = []
-        for c in range(n_classes):
-            mask = dets['labels'] == c
-            if mask.any():
-                cls_bboxes = dets['bboxes'][mask]
-                cls_scores = dets['scores'][mask].reshape(-1, 1)
-                per_class.append(
-                    np.hstack([cls_bboxes, cls_scores]).astype(np.float32)
-                )
-            else:
-                per_class.append(np.zeros((0, 5), dtype=np.float32))
-        return per_class
+        return dets_to_eval_format(dets, n_classes)
 
     def compute_benign_map(
         self,
@@ -749,63 +709,7 @@ class DetectionAttackPipeline:
         iou_thr: float = 0.5,
         verbose: bool = True,
     ) -> Dict:
-        """Compute mAP using benign model predictions as GT.
-
-        Measures how much the adversarial attack degrades detections
-        relative to the model's own benign predictions.
-
-        Args:
-            results: List of result dicts from run_attack.
-            iou_thr: IoU threshold for mAP evaluation.
-
-        Returns:
-            Dict with orig_mAP, adv_mAP, per_class_ap, mAP_drop.
-        """
-        n_classes = len(self.model.classes)
-
-        annotations = []
-        orig_det_results = []
-        adv_det_results = []
-
-        for r in results:
-            orig_dets = r['orig_detections']
-            adv_dets = r['adv_detections']
-
-            annotations.append({
-                'bboxes': np.asarray(orig_dets['bboxes'], dtype=np.float32).reshape(-1, 4),
-                'labels': np.asarray(orig_dets['labels'], dtype=np.int64).reshape(-1),
-            })
-            orig_det_results.append(self._dets_to_eval_format(orig_dets, n_classes))
-            adv_det_results.append(self._dets_to_eval_format(adv_dets, n_classes))
-
-        orig_mAP, _ = eval_map(
-            orig_det_results, annotations,
-            iou_thr=iou_thr, logger='silent',
-        )
-        adv_mAP, adv_details = eval_map(
-            adv_det_results, annotations,
-            iou_thr=iou_thr, logger='silent',
-        )
-
-        per_class_ap = [
-            d['ap'].item() if d['ap'].size > 0 else 0.0
-            for d in adv_details
-        ]
-
-        result = {
-            'orig_mAP': float(orig_mAP),
-            'adv_mAP': float(adv_mAP),
-            'per_class_ap': per_class_ap,
-            'mAP_drop': float(orig_mAP - adv_mAP),
-        }
-
-        if verbose:
-            print(f"\n[Pipeline] === Benign mAP (IoU={iou_thr}) ===")
-            print(f"  Benign orig mAP : {orig_mAP:.4f}")
-            print(f"  Benign adv mAP  : {adv_mAP:.4f}")
-            print(f"  mAP Drop        : {result['mAP_drop']:.4f}")
-
-        return result
+        return evaluate_benign_map(self.model, results, iou_thr, verbose)
 
     def compute_gt_map(
         self,

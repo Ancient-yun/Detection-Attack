@@ -3,5 +3,5 @@ set -euo pipefail
 
 python scripts/experiments/run_matrix.py \
   --config experiments/baseline.json \
-  --targets yolov8n \
+  --targets atss \
   "$@"
