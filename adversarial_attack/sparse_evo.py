@@ -112,7 +112,8 @@ class SpaEvoAtt:
         population = []
 
         # Base mask: 1 where timg differs from oimg
-        base_mask = np.zeros(h * w, dtype=int)
+        # int8: values are only 0/1; keeps mask ops and H2D transfer 8x lighter.
+        base_mask = np.zeros(h * w, dtype=np.int8)
         diff_indices = self._compute_mask(oimg, timg)
         base_mask[diff_indices] = 1
 
@@ -174,8 +175,9 @@ class SpaEvoAtt:
         cross_points = np.random.rand(len(p1)) < self.cr
         if not np.any(cross_points):
             cross_points[np.random.randint(0, len(p1))] = True
-        trial = np.where(cross_points, p1, p2).astype(int)
-        trial = np.logical_and(p_best, trial).astype(int)
+        # int8 masks: identical 0/1 values, 8x less memory bandwidth than int64.
+        trial = np.where(cross_points, p1, p2).astype(np.int8)
+        trial = np.logical_and(p_best, trial).astype(np.int8)
         return trial
 
     def _mutate(self, mask: np.ndarray) -> np.ndarray:
@@ -225,7 +227,8 @@ class SpaEvoAtt:
         return torch.where(mask_tensor, timg, oimg)
 
     def _mask_l0(self, mask: np.ndarray) -> int:
-        return int(mask.sum())
+        # explicit int64 accumulator: int8 masks must not overflow when summed.
+        return int(mask.sum(dtype=np.int64))
 
     def _evaluate_fitness(
         self,

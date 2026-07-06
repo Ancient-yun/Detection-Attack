@@ -34,12 +34,40 @@ class PointWiseAtt:
         self.flag = flag
         self.log_interval = log_interval
         self.verbose = verbose
+        # Persistent pinned CPU + GPU staging buffers for the per-query model
+        # input, so each query reuses one H2D transfer instead of allocating a
+        # fresh tensor via torch.from_numpy(...).to(device) every time.
+        self._qbuf = None
+        self._qpin = None
 
     def _device(self) -> torch.device:
         return torch.device(getattr(self.model, "device", "cuda:0"))
 
     def _tensor(self, img: np.ndarray) -> torch.Tensor:
         return torch.from_numpy(img).float().to(self._device())
+
+    def _query_tensor(self, img: np.ndarray) -> torch.Tensor:
+        """Stage the query image through reused pinned/GPU buffers.
+
+        Produces the exact same float32 device tensor as ``_tensor`` (identical
+        bytes) but avoids per-query allocation. Only used for the hot
+        model-query path; ``_tensor`` still backs snapshots and L0 so those
+        callers keep independent tensors.
+        """
+        arr = np.ascontiguousarray(img, dtype=np.float32)
+        dev = self._device()
+        if (
+            self._qbuf is None
+            or tuple(self._qbuf.shape) != arr.shape
+            or self._qbuf.device != dev
+        ):
+            self._qpin = torch.empty(
+                arr.shape, dtype=torch.float32, pin_memory=True
+            )
+            self._qbuf = torch.empty(arr.shape, dtype=torch.float32, device=dev)
+        self._qpin.copy_(torch.from_numpy(arr))
+        self._qbuf.copy_(self._qpin, non_blocking=True)
+        return self._qbuf
 
     def _check_adv_status(
         self,
@@ -58,7 +86,7 @@ class PointWiseAtt:
             True if adversarial.
         """
         pred_label = self.model.predict_label(
-            self._tensor(img)
+            self._query_tensor(img)
         )
         if self.flag:
             return pred_label == tlabel
