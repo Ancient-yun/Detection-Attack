@@ -623,8 +623,9 @@ class DetectionAttackPipeline:
                 adv_bgr,
             )
 
-            # Save snapshot images at query intervals
-            snapshots = r.get('snapshots', {})
+            # Save snapshot images at query intervals (only when requested;
+            # each snapshot also costs an extra model query for its overlay).
+            snapshots = r.get('snapshots', {}) if save_snapshots else {}
             if snapshots:
                 for query_num, snap_tensor in sorted(snapshots.items()):
                     snap_bgr = self._tensor_to_bgr(snap_tensor)
