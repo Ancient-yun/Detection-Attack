@@ -50,7 +50,6 @@ def test_build_command_can_enable_snapshots_without_disabling_final_images(
         sample_seed=None,
         resume_partial=None,
         save_snapshots=True,
-        yolo_inference_mode=None,
     )
     config = {
         "defaults": {"num_images": 1, "max_query": 10, "seed": 0},
@@ -70,35 +69,3 @@ def test_build_command_can_enable_snapshots_without_disabling_final_images(
 
     assert "--save-snapshots" in cmd
     assert "--no-save-images" not in cmd
-
-
-def test_build_command_can_select_yolo_direct_tensor_mode(
-    tmp_path: Path,
-) -> None:
-    args = SimpleNamespace(
-        python="python",
-        score_thr=None,
-        num_images=None,
-        sample_strategy=None,
-        sample_seed=None,
-        resume_partial=None,
-        save_snapshots=False,
-        yolo_inference_mode="direct_tensor",
-    )
-    config = {
-        "defaults": {"num_images": 1, "max_query": 10, "seed": 0},
-        "comparison": {"target_score_thr": 0.5},
-    }
-    case = {
-        "attack": "sparse_evo",
-        "dataset_name": "dataset",
-        "model": "yolov8n",
-        "run_name": "run",
-        "model_type": "yolov8",
-        "checkpoint": "ckpt/yolov8n.pt",
-        "image_dir": "images",
-    }
-
-    cmd = build_command(args, config, case, tmp_path)
-
-    assert cmd[cmd.index("--yolo-inference-mode") + 1] == "direct_tensor"

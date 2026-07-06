@@ -140,8 +140,6 @@ def _command_for(job: dict[str, object]) -> list[str]:
             [
                 "--config",
                 str(job["config"]),
-                "--mmdet-inference-mode",
-                str(job["mmdet_inference_mode"]),
             ]
         )
     command.extend(

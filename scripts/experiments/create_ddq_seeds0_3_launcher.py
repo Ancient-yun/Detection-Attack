@@ -65,7 +65,6 @@ def main() -> None:
         "ann_file": str(ANN_FILE),
         "config": CONFIG,
         "checkpoint": CHECKPOINT,
-        "mmdet_inference_mode": "direct_tensor",
         "jobs": jobs,
     }
     (root / "run_plan.json").write_text(
@@ -90,7 +89,6 @@ def main() -> None:
             "run_attack.py",
             "--model-type mmdet",
             f"--config {quote(CONFIG)}",
-            "--mmdet-inference-mode direct_tensor",
             f"--checkpoint {quote(CHECKPOINT)}",
             f"--image-dir {quote(IMAGE_DIR)}",
             f"--ann-file {quote(ANN_FILE)}",

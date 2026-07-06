@@ -93,7 +93,6 @@ def main() -> None:
             cmd.extend(
                 [
                     f"--config {quote(job['config'])}",
-                    f"--mmdet-inference-mode {quote(job['mmdet_inference_mode'])}",
                 ]
             )
         cmd.extend(

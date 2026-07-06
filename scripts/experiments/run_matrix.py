@@ -37,11 +37,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-resume-partial", dest="resume_partial", action="store_false")
     parser.add_argument("--save-snapshots", dest="save_snapshots", action="store_true", default=None)
     parser.add_argument("--no-save-snapshots", dest="save_snapshots", action="store_false")
-    parser.add_argument(
-        "--yolo-inference-mode",
-        choices=["legacy", "direct_tensor"],
-        default=None,
-    )
     return parser.parse_args()
 
 
@@ -118,13 +113,6 @@ def build_command(
     model_type = case.get("model_type", "mmdet")
     if model_type != "mmdet":
         cmd.extend(["--model-type", model_type])
-    yolo_inference_mode = (
-        args.yolo_inference_mode
-        or case.get("yolo_inference_mode")
-        or defaults.get("yolo_inference_mode")
-    )
-    if model_type == "yolov8" and yolo_inference_mode:
-        cmd.extend(["--yolo-inference-mode", as_cli_value(yolo_inference_mode)])
     if case.get("config"):
         cmd.extend(["--config", case["config"]])
     cmd.extend(

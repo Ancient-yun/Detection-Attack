@@ -71,7 +71,6 @@ def matrix_model(
         "model": alias or normalize_key(case.get("short") or case["model"]),
         "model_type": case.get("model_type", "mmdet"),
         "checkpoint": case["checkpoint"],
-        "mmdet_inference_mode": case.get("mmdet_inference_mode", "direct_tensor"),
     }
     if case.get("config"):
         model["config"] = case["config"]
