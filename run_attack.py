@@ -28,10 +28,11 @@ Usage:
 """
 
 import os
-import glob
+import pickle
 import time
 import torch
 from argparse import ArgumentParser
+from tqdm import tqdm
 
 # PyTorch 2.6 compatibility patch
 _original_load = torch.load
@@ -40,7 +41,12 @@ torch.load = lambda *args, **kwargs: _original_load(
 )
 
 from adversarial_attack import DetectionAttackPipeline
-from utils import build_output_dir, save_experiment_report
+from adversarial_attack.utils import build_output_dir, save_experiment_report
+from adversarial_attack.utils.image_selection import (
+    select_image_paths,
+    validate_sample_manifest,
+    write_sample_manifest,
+)
 
 
 def parse_args():
@@ -73,6 +79,26 @@ def parse_args():
         help='Limit number of images to attack ("all" or an integer, default: "all")',
     )
     parser.add_argument(
+        '--sample-strategy',
+        default='first',
+        choices=['first', 'random'],
+        help='Image selection strategy for --image-dir (default: first)',
+    )
+    parser.add_argument(
+        '--sample-seed',
+        type=int,
+        default=None,
+        help='Random seed for --sample-strategy random. Defaults to --seed.',
+    )
+    parser.add_argument(
+        '--sample-manifest',
+        default=None,
+        help=(
+            'Path to write selected image manifest. Defaults to '
+            'output-dir/sample_manifest.json.'
+        ),
+    )
+    parser.add_argument(
         '--dataset-name', default='dataset',
         help='Name of the dataset for organizing results (default: dataset)',
     )
@@ -103,8 +129,53 @@ def parse_args():
         help='Device (default: cuda:0)',
     )
     parser.add_argument(
+        '--mmdet-inference-mode',
+        default='legacy',
+        choices=['legacy', 'legacy_cached', 'direct_tensor'],
+        help=(
+            'MMDetection inference path. "legacy" uses inference_detector; '
+            '"legacy_cached" reuses the same MMDetection test pipeline; '
+            '"direct_tensor" feeds tensors directly to model.test_step '
+            '(default: legacy).'
+        ),
+    )
+    parser.add_argument(
+        '--yolo-inference-mode',
+        default='legacy',
+        choices=['legacy', 'direct_tensor'],
+        help=(
+            'YOLOv8 inference path. "legacy" preserves Ultralytics '
+            'high-level prediction semantics; "direct_tensor" avoids CPU '
+            'image conversion but is not bitwise-equivalent (default: legacy).'
+        ),
+    )
+    parser.add_argument(
         '--output-dir', default='outputs/attack_results',
         help='Output directory (default: outputs/attack_results)',
+    )
+    parser.add_argument(
+        '--save-snapshots',
+        dest='save_snapshots',
+        action='store_true',
+        default=False,
+        help='Save intermediate query_*.png snapshot visualizations.',
+    )
+    parser.add_argument(
+        '--no-save-snapshots',
+        dest='save_snapshots',
+        action='store_false',
+        help='Skip intermediate query_*.png snapshots while keeping final images.',
+    )
+    parser.add_argument(
+        '--resume-partial', action='store_true',
+        help=(
+            'Resume a long run from output-dir/partial_results.pkl and save '
+            'one lightweight checkpoint after each completed image.'
+        ),
+    )
+    parser.add_argument(
+        '--partial-file', default=None,
+        help='Optional partial checkpoint path for --resume-partial.',
     )
     parser.add_argument(
         '--seed', type=int, default=None,
@@ -140,6 +211,101 @@ def parse_args():
     return parser.parse_args()
 
 
+def _norm_image_path(path):
+    return os.path.abspath(os.path.normpath(path))
+
+
+def _strip_result_for_partial(result):
+    """Keep enough data to finish reports while avoiding huge checkpoints."""
+    stripped = {}
+    for key, value in result.items():
+        if key in ('snapshots', 'l0_trace'):
+            continue
+        if key == 'adv_image' and isinstance(value, torch.Tensor):
+            stripped['adv_image_uint8'] = (
+                value.detach().cpu().mul(255).round().clamp(0, 255)
+                .to(torch.uint8)
+            )
+            continue
+        if isinstance(value, torch.Tensor):
+            stripped[key] = value.detach().cpu()
+        else:
+            stripped[key] = value
+    return stripped
+
+
+def _restore_partial_result(result):
+    if 'adv_image' not in result and 'adv_image_uint8' in result:
+        restored = dict(result)
+        restored['adv_image'] = restored.pop('adv_image_uint8').float() / 255.0
+        return restored
+    return result
+
+
+def _load_partial_results(partial_path):
+    if not os.path.exists(partial_path):
+        return []
+    with open(partial_path, 'rb') as f:
+        payload = pickle.load(f)
+    if isinstance(payload, dict):
+        results = payload.get('results', [])
+    else:
+        results = payload
+    return [_restore_partial_result(r) for r in results]
+
+
+def _save_partial_results(partial_path, results, args):
+    os.makedirs(os.path.dirname(partial_path), exist_ok=True)
+    tmp_path = partial_path + '.tmp'
+    payload = {
+        'args': vars(args),
+        'results': [_strip_result_for_partial(r) for r in results],
+        'updated_at': time.time(),
+    }
+    with open(tmp_path, 'wb') as f:
+        pickle.dump(payload, f)
+    os.replace(tmp_path, partial_path)
+
+
+def _run_attacks_with_partial_resume(pipeline, image_paths, args, partial_path):
+    loaded_results = _load_partial_results(partial_path)
+    results_by_path = {
+        _norm_image_path(r['image_path']): r
+        for r in loaded_results
+        if isinstance(r, dict) and 'image_path' in r
+    }
+    if results_by_path:
+        print(
+            f"[Partial] Loaded {len(results_by_path)} completed image(s): "
+            f"{partial_path}"
+        )
+
+    pbar = tqdm(image_paths, desc="Attacking", unit="img")
+    for i, path in enumerate(pbar):
+        key = _norm_image_path(path)
+        if key in results_by_path:
+            pbar.set_postfix(done=f"{len(results_by_path)}/{len(image_paths)}")
+            continue
+
+        img_seed = args.seed + i if args.seed is not None else None
+        result = pipeline.run_attack(path, max_query=args.max_query, seed=img_seed)
+        results_by_path[key] = _strip_result_for_partial(result)
+
+        ordered_partial = [
+            results_by_path[_norm_image_path(p)]
+            for p in image_paths
+            if _norm_image_path(p) in results_by_path
+        ]
+        _save_partial_results(partial_path, ordered_partial, args)
+        pbar.set_postfix(done=f"{len(results_by_path)}/{len(image_paths)}")
+
+    return [
+        _restore_partial_result(results_by_path[_norm_image_path(p)])
+        for p in image_paths
+        if _norm_image_path(p) in results_by_path
+    ]
+
+
 def main():
     args = parse_args()
 
@@ -173,7 +339,48 @@ def main():
     elif args.attack in ('pointwise_multi', 'pointwise_multi_sched'):
         attack_kwargs = {'npix': args.npix}
 
-    # Create pipeline
+    sample_manifest_path = args.sample_manifest or os.path.join(
+        output_dir, 'sample_manifest.json'
+    )
+
+    # Collect image paths
+    if args.image is not None:
+        image_paths = [args.image]
+        sample_selection = None
+    else:
+        sample_seed = args.sample_seed
+        if sample_seed is None:
+            sample_seed = args.seed
+        sample_selection = select_image_paths(
+            args.image_dir,
+            num_images=args.num_images,
+            sample_strategy=args.sample_strategy,
+            sample_seed=sample_seed,
+        )
+        image_paths = sample_selection.selected_image_paths
+        if args.resume_partial:
+            validate_sample_manifest(sample_manifest_path, sample_selection)
+        write_sample_manifest(sample_manifest_path, sample_selection)
+
+    print(f"[Main] {len(image_paths)} image(s) to attack")
+    print(f"[Main] Attack method: {args.attack}")
+    print(f"[Main] Max queries: {args.max_query}")
+    print(f"[Main] Output dir: {output_dir}")
+    if args.model_type == 'mmdet':
+        print(f"[Main] MMDet inference mode: {args.mmdet_inference_mode}")
+    if args.model_type == 'yolov8':
+        print(f"[Main] YOLO inference mode: {args.yolo_inference_mode}")
+    if sample_selection is not None:
+        print(f"[Main] Sample strategy: {sample_selection.sample_strategy}")
+        print(f"[Main] Sample seed: {sample_selection.sample_seed}")
+        print(f"[Main] Sample manifest: {sample_manifest_path}")
+    if args.resume_partial:
+        partial_path = args.partial_file or os.path.join(
+            output_dir, 'partial_results.pkl'
+        )
+        print(f"[Main] Partial resume: {partial_path}")
+
+    # Create pipeline after sample selection so invalid sampling fails fast.
     pipeline = DetectionAttackPipeline(
         model_type=args.model_type,
         config_path=args.config,
@@ -184,46 +391,19 @@ def main():
         iou_thr=args.iou_thr,
         success_thr=args.success_thr,
         log_interval=args.log_interval,
+        mmdet_inference_mode=args.mmdet_inference_mode,
+        yolo_inference_mode=args.yolo_inference_mode,
         **attack_kwargs,
     )
-
-    # Collect image paths
-    if args.image is not None:
-        image_paths = [args.image]
-    else:
-        extensions = ('*.jpg', '*.jpeg', '*.png', '*.bmp')
-        image_paths = []
-        for ext in extensions:
-            # Search flat directory
-            image_paths.extend(glob.glob(os.path.join(args.image_dir, ext)))
-            # Search nested directories recursively (e.g., images/val/)
-            image_paths.extend(glob.glob(os.path.join(args.image_dir, '**', ext), recursive=True))
-        
-        # Remove duplicates
-        image_paths = list(set(image_paths))
-        image_paths.sort()
-        if not image_paths:
-            raise FileNotFoundError(
-                f"No images found in {args.image_dir}"
-            )
-
-    # Limit number of images
-    if args.num_images is not None and str(args.num_images).lower() != 'all':
-        try:
-            limit = int(args.num_images)
-            image_paths = image_paths[:limit]
-        except ValueError:
-            print(f"[Warning] Invalid --num-images value '{args.num_images}'. Using all images.")
-
-    print(f"[Main] {len(image_paths)} image(s) to attack")
-    print(f"[Main] Attack method: {args.attack}")
-    print(f"[Main] Max queries: {args.max_query}")
-    print(f"[Main] Output dir: {output_dir}")
 
     # Run attacks
     start_time = time.time()
 
-    if len(image_paths) == 1:
+    if args.resume_partial:
+        results = _run_attacks_with_partial_resume(
+            pipeline, image_paths, args, partial_path,
+        )
+    elif len(image_paths) == 1:
         results = [
             pipeline.run_attack(
                 image_paths[0],
@@ -241,7 +421,12 @@ def main():
     elapsed_time = time.time() - start_time
 
     # Save results (images + CSV)
-    pipeline.save_results(results, output_dir, ann_file=args.ann_file)
+    pipeline.save_results(
+        results,
+        output_dir,
+        ann_file=args.ann_file,
+        save_snapshots=args.save_snapshots,
+    )
 
     # Compute mAP
     # Benign: model predictions on original images as GT

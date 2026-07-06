@@ -76,9 +76,11 @@ class SpaEvoAtt:
             1D array of pixel indices that differ.
         """
         diff = torch.abs(oimg - timg)
-        pixel_diff = torch.zeros(diff.shape[2], diff.shape[3]).bool().cuda()
+        pixel_diff = torch.zeros(
+            diff.shape[2], diff.shape[3], dtype=torch.bool, device=diff.device
+        )
         for c in range(diff.shape[1]):
-            pixel_diff = pixel_diff | (diff[0, c] > 0.0).bool().cuda()
+            pixel_diff = pixel_diff | (diff[0, c] > 0.0).bool()
 
         w = oimg.shape[3]  # W dimension
         coords = np.where(pixel_diff.int().cpu().numpy() == 1)
@@ -213,12 +215,17 @@ class SpaEvoAtt:
         Returns:
             Perturbed image [1, C, H, W].
         """
-        w = oimg.shape[3]  # W dimension
-        img = timg.clone()
-        zero_indices = np.where(mask == 0)[0]
-        rows, cols = self._convert_1d_to_2d(zero_indices, w)
-        img[:, :, rows, cols] = oimg[:, :, rows, cols]
-        return img
+        h = oimg.shape[2]
+        w = oimg.shape[3]
+        mask_tensor = torch.as_tensor(
+            mask.reshape(1, 1, h, w),
+            device=oimg.device,
+            dtype=torch.bool,
+        )
+        return torch.where(mask_tensor, timg, oimg)
+
+    def _mask_l0(self, mask: np.ndarray) -> int:
+        return int(mask.sum())
 
     def _evaluate_fitness(
         self,
@@ -286,7 +293,7 @@ class SpaEvoAtt:
         if self.seed is not None:
             np.random.seed(self.seed)
 
-        D = torch.zeros(max_query + 500, dtype=int).cuda()
+        D = torch.zeros(max_query + 500, dtype=torch.long, device=oimg.device)
         width = oimg.shape[3]
         height = oimg.shape[2]
 
@@ -312,9 +319,7 @@ class SpaEvoAtt:
         worst_idx = rank[-1].item()
 
         # Record initial L0
-        D[:n_queries] = compute_l0(
-            self._apply_mask(population[best_idx], oimg, timg), oimg
-        )
+        D[:n_queries] = self._mask_l0(population[best_idx])
 
         # 3. Evolution loop
         while True:
@@ -347,14 +352,12 @@ class SpaEvoAtt:
             worst_idx = rank[-1].item()
 
             # Record L0
-            D[n_queries] = compute_l0(
-                self._apply_mask(population[best_idx], oimg, timg), oimg
-            )
+            D[n_queries] = self._mask_l0(population[best_idx])
             n_queries += 1
 
             if self.verbose and n_queries % self.log_interval == 0:
                 best_img = self._apply_mask(population[best_idx], oimg, timg)
-                current_l0 = compute_l0(best_img, oimg)
+                current_l0 = self._mask_l0(population[best_idx])
                 total_pixels = oimg.shape[2] * oimg.shape[3]
                 sr = current_l0 / total_pixels
                 print(
