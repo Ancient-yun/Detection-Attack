@@ -40,9 +40,11 @@ class MMDetModelAdapter:
         score_thr: Detection confidence threshold (default: 0.3).
         iou_thr: IoU threshold for bbox matching (default: 0.5).
         success_thr: Minimum attack success rate for predict_label (default: 0.5).
-        inference_mode: 'legacy' uses inference_detector. 'legacy_cached'
-            reuses the legacy MMDetection test pipeline. 'direct_tensor'
-            feeds GPU tensors directly to model.test_step.
+        inference_mode: kept for backward compatibility. The adapter is now
+            tensor-only: an original-size RGB [0, 1] tensor goes in, all
+            preprocessing (keep-ratio resize + normalization) happens inside
+            the model function, and boxes come back in original coordinates.
+            Any of the accepted values maps to this single path.
     """
 
     SUPPORTED_INFERENCE_MODES = {'legacy', 'legacy_cached', 'direct_tensor'}
@@ -156,78 +158,6 @@ class MMDetModelAdapter:
         })
         return x.contiguous(), data_sample
 
-    def _get_resize_cfg(self) -> tuple[tuple[int, int], bool]:
-        """Extract Resize transform settings used by the test pipeline."""
-        cfg = self.model.cfg
-        try:
-            test_pipeline = cfg.test_dataloader.dataset.pipeline
-            for transform in test_pipeline:
-                if transform.get('type') in ('Resize',):
-                    scale = transform.get('scale', (640, 640))
-                    keep_ratio = transform.get('keep_ratio', True)
-                    return tuple(scale), bool(keep_ratio)
-        except Exception:
-            pass
-        return (640, 640), True
-
-    def _build_legacy_test_pipeline(self) -> Compose:
-        """Build the same ndarray test pipeline inference_detector creates."""
-        cfg = self.model.cfg.copy()
-        test_pipeline = get_test_pipeline_cfg(cfg)
-        test_pipeline[0].type = 'mmdet.LoadImageFromNDArray'
-        return Compose(test_pipeline)
-
-    def _tensor_to_numpy_img(self, x: torch.Tensor) -> np.ndarray:
-        """Convert [1, C, H, W] tensor in [0,1] range to [H, W, C] uint8 BGR.
-
-        mmdetection's inference_detector expects BGR numpy images.
-        """
-        if x.dim() == 4:
-            x = x[0]
-
-        if x.is_cuda and x.dtype == torch.float32:
-            # Preserve legacy input bytes while avoiding a float32 CPU copy.
-            img = x.detach().clamp(0, 1).mul(255).to(torch.uint8)
-            img = img[[2, 1, 0], :, :].permute(1, 2, 0).contiguous()
-            return img.cpu().numpy()
-
-        # [C, H, W] → [H, W, C], RGB → BGR, [0,1] → [0,255]
-        img = x.detach().cpu().numpy().transpose(1, 2, 0)
-        img = (img * 255).clip(0, 255).astype(np.uint8)
-        img = img[:, :, ::-1]  # RGB → BGR
-        return np.ascontiguousarray(img)
-
-    def _resize_bgr_tensor_for_mmdet(
-        self,
-        img: torch.Tensor,
-    ) -> tuple[torch.Tensor, tuple[int, int], tuple[float, float]]:
-        """Resize a BGR CHW tensor on GPU like the MMDetection test pipeline.
-
-        Args:
-            img: BGR tensor with shape [3, H, W] and range [0, 255].
-
-        Returns:
-            Resized tensor, resized (height, width), and scale factor in
-            (width_scale, height_scale) order.
-        """
-        inputs, data_sample = self._preprocess_tensor(x)
-
-        with torch.no_grad():
-            result = self.model(
-                inputs,
-                data_samples=[data_sample],
-                mode='predict',
-            )[0]
-
-        data_sample = DetDataSample()
-        data_sample.set_metainfo({
-            'img_id': 0,
-            'ori_shape': (ori_h, ori_w),
-            'img_shape': (img_h, img_w),
-            'scale_factor': scale_factor,
-        })
-        return {'inputs': [img], 'data_samples': [data_sample]}
-
     def _format_prediction(self, result) -> Dict[str, np.ndarray]:
         """Convert a DetDataSample into the attack result format."""
         pred_instances = result.pred_instances
@@ -251,35 +181,22 @@ class MMDetModelAdapter:
             pred_instances.scores[mask].detach(),
         )
 
-    def _predict_legacy(
-        self,
-        x: torch.Tensor,
-        *,
-        use_cached_pipeline: bool = False,
-    ) -> Dict[str, np.ndarray]:
-        """Run detection through the original inference_detector path."""
-        img_np = self._tensor_to_numpy_img(x)
-        test_pipeline = (
-            self._legacy_test_pipeline if use_cached_pipeline else None
-        )
-
-        with torch.no_grad():
-            result = inference_detector(
-                self.model,
-                img_np,
-                test_pipeline=test_pipeline,
-            )
-
-        return self._format_prediction(result)
-
     def _predict_direct_tensor_raw(
         self,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run detection with GPU tensor input and keep tensor outputs."""
-        data = self._tensor_to_mmdet_data(x)
+        """Run detection on an original-size RGB [0, 1] tensor.
+
+        This is the model function ``f``: all preprocessing (keep-ratio resize
+        + normalization) happens inside ``_preprocess_tensor``, and the detector
+        rescales boxes back to the original image size, so callers only ever
+        work in original-image space.
+        """
+        inputs, data_sample = self._preprocess_tensor(x)
         with torch.inference_mode():
-            result = self.model.test_step(data)[0]
+            result = self.model(
+                inputs, data_samples=[data_sample], mode='predict',
+            )[0]
         return self._format_prediction_tensors(result)
 
     def _predict_direct_tensor(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
@@ -379,11 +296,7 @@ class MMDetModelAdapter:
                 - 'labels': np.ndarray [N] (class indices)
                 - 'scores': np.ndarray [N] (confidence scores)
         """
-        if self.inference_mode == 'legacy_cached':
-            return self._predict_legacy(x, use_cached_pipeline=True)
-        if self.inference_mode == 'direct_tensor':
-            return self._predict_direct_tensor(x)
-        return self._predict_legacy(x)
+        return self._predict_direct_tensor(x)
 
     def predict_label(self, x: torch.Tensor) -> int:
         """Decision-based prediction for attack compatibility.
@@ -404,25 +317,13 @@ class MMDetModelAdapter:
             )
             return 0
 
-        if (
-            self.inference_mode == 'direct_tensor'
-            and self._ref_bboxes_tensor is not None
-            and self._ref_labels_tensor is not None
-        ):
-            bboxes, labels, _ = self._predict_direct_tensor_raw(x)
-            result = self._match_detections_torch(
-                self._ref_bboxes_tensor,
-                self._ref_labels_tensor,
-                bboxes,
-                labels,
-            )
-        else:
-            dets = self.predict(x)
-            result = match_detections(
-                self._ref_bboxes, self._ref_labels,
-                dets['bboxes'], dets['labels'],
-                iou_thr=self.iou_thr,
-            )
+        bboxes, labels, _ = self._predict_direct_tensor_raw(x)
+        result = self._match_detections_torch(
+            self._ref_bboxes_tensor,
+            self._ref_labels_tensor,
+            bboxes,
+            labels,
+        )
 
         # Compute success rate
         if result['total'] == 0:
@@ -445,27 +346,14 @@ class MMDetModelAdapter:
         Returns:
             Detection result dict (bboxes, labels, scores).
         """
-        if self.inference_mode == 'direct_tensor':
-            bboxes, labels, scores = self._predict_direct_tensor_raw(x)
-            self._ref_bboxes_tensor = bboxes
-            self._ref_labels_tensor = labels
-            dets = {
-                'bboxes': bboxes.cpu().numpy(),
-                'labels': labels.cpu().numpy(),
-                'scores': scores.cpu().numpy(),
-            }
-        else:
-            dets = self.predict(x)
-            self._ref_bboxes_tensor = torch.as_tensor(
-                dets['bboxes'],
-                device=self.device,
-                dtype=torch.float32,
-            )
-            self._ref_labels_tensor = torch.as_tensor(
-                dets['labels'],
-                device=self.device,
-                dtype=torch.long,
-            )
+        bboxes, labels, scores = self._predict_direct_tensor_raw(x)
+        self._ref_bboxes_tensor = bboxes
+        self._ref_labels_tensor = labels
+        dets = {
+            'bboxes': bboxes.cpu().numpy(),
+            'labels': labels.cpu().numpy(),
+            'scores': scores.cpu().numpy(),
+        }
 
         self._ref_bboxes = dets['bboxes']
         self._ref_labels = dets['labels']
