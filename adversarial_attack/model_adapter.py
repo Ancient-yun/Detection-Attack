@@ -40,14 +40,11 @@ class MMDetModelAdapter:
         score_thr: Detection confidence threshold (default: 0.3).
         iou_thr: IoU threshold for bbox matching (default: 0.5).
         success_thr: Minimum attack success rate for predict_label (default: 0.5).
-        inference_mode: kept for backward compatibility. The adapter is now
-            tensor-only: an original-size RGB [0, 1] tensor goes in, all
-            preprocessing (keep-ratio resize + normalization) happens inside
-            the model function, and boxes come back in original coordinates.
-            Any of the accepted values maps to this single path.
-    """
 
-    SUPPORTED_INFERENCE_MODES = {'legacy', 'legacy_cached', 'direct_tensor'}
+    Tensor-only: an original-size RGB [0, 1] tensor goes in, all preprocessing
+    (keep-ratio resize + normalization) happens inside the model function, and
+    boxes come back in original image coordinates.
+    """
 
     def __init__(
         self,
@@ -57,18 +54,11 @@ class MMDetModelAdapter:
         score_thr: float = 0.3,
         iou_thr: float = 0.5,
         success_thr: float = 0.5,
-        inference_mode: str = 'legacy',
     ):
-        if inference_mode not in self.SUPPORTED_INFERENCE_MODES:
-            raise ValueError(
-                f"Unsupported mmdet inference mode: {inference_mode!r}. "
-                f"Choose from {sorted(self.SUPPORTED_INFERENCE_MODES)}."
-            )
         self.device = device
         self.score_thr = score_thr
         self.iou_thr = iou_thr
         self.success_thr = success_thr
-        self.inference_mode = inference_mode
 
         # Load mmdetection model
         self.model = init_detector(config_path, checkpoint_path, device=device)
@@ -181,7 +171,7 @@ class MMDetModelAdapter:
             pred_instances.scores[mask].detach(),
         )
 
-    def _predict_direct_tensor_raw(
+    def _predict_raw(
         self,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -199,9 +189,9 @@ class MMDetModelAdapter:
             )[0]
         return self._format_prediction_tensors(result)
 
-    def _predict_direct_tensor(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
+    def _predict_dict(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
         """Run detection by feeding GPU tensors directly to model.test_step."""
-        bboxes, labels, scores = self._predict_direct_tensor_raw(x)
+        bboxes, labels, scores = self._predict_raw(x)
         return {
             'bboxes': bboxes.cpu().numpy(),
             'labels': labels.cpu().numpy(),
@@ -296,7 +286,7 @@ class MMDetModelAdapter:
                 - 'labels': np.ndarray [N] (class indices)
                 - 'scores': np.ndarray [N] (confidence scores)
         """
-        return self._predict_direct_tensor(x)
+        return self._predict_dict(x)
 
     def predict_label(self, x: torch.Tensor) -> int:
         """Decision-based prediction for attack compatibility.
@@ -317,7 +307,7 @@ class MMDetModelAdapter:
             )
             return 0
 
-        bboxes, labels, _ = self._predict_direct_tensor_raw(x)
+        bboxes, labels, _ = self._predict_raw(x)
         result = self._match_detections_torch(
             self._ref_bboxes_tensor,
             self._ref_labels_tensor,
@@ -346,7 +336,7 @@ class MMDetModelAdapter:
         Returns:
             Detection result dict (bboxes, labels, scores).
         """
-        bboxes, labels, scores = self._predict_direct_tensor_raw(x)
+        bboxes, labels, scores = self._predict_raw(x)
         self._ref_bboxes_tensor = bboxes
         self._ref_labels_tensor = labels
         dets = {
@@ -402,12 +392,10 @@ class Yolov8ModelAdapter:
         score_thr: Detection confidence threshold (default: 0.3).
         iou_thr: IoU threshold for bbox matching (default: 0.5).
         success_thr: Minimum attack success rate for predict_label (default: 0.5).
-        inference_mode: kept for backward compatibility. YOLO now has a single
-            path: the original-size image goes to Ultralytics, which letterboxes
-            internally and returns boxes in original coordinates.
-    """
 
-    SUPPORTED_INFERENCE_MODES = {'legacy', 'direct_tensor'}
+    Single tensor path: the original-size image goes to Ultralytics, which
+    letterboxes internally and returns boxes in original coordinates.
+    """
 
     def __init__(
         self,
@@ -416,13 +404,7 @@ class Yolov8ModelAdapter:
         score_thr: float = 0.3,
         iou_thr: float = 0.5,
         success_thr: float = 0.5,
-        inference_mode: str = 'legacy',
     ):
-        if inference_mode not in self.SUPPORTED_INFERENCE_MODES:
-            raise ValueError(
-                f"Unsupported YOLOv8 inference mode: {inference_mode!r}. "
-                f"Choose from {self.SUPPORTED_INFERENCE_MODES}"
-            )
         try:
             from ultralytics import YOLO
         except ImportError:
@@ -434,7 +416,6 @@ class Yolov8ModelAdapter:
         self.score_thr = score_thr
         self.iou_thr = iou_thr
         self.success_thr = success_thr
-        self.inference_mode = inference_mode
 
         # Load YOLO model
         self.model = YOLO(checkpoint_path)

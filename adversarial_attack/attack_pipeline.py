@@ -38,11 +38,6 @@ class DetectionAttackPipeline:
         iou_thr: IoU threshold for attack success matching.
         success_thr: Minimum success rate to declare attack successful.
         log_interval: Print progress every N queries.
-        mmdet_inference_mode: MMDetection inference path. 'legacy' uses
-            inference_detector; 'direct_tensor' avoids CPU image conversion.
-        yolo_inference_mode: YOLOv8 inference path. 'legacy' preserves
-            Ultralytics high-level prediction semantics; 'direct_tensor'
-            avoids CPU image conversion but is not bitwise-equivalent.
         attack_kwargs: Additional kwargs for the attack class.
     """
 
@@ -61,8 +56,6 @@ class DetectionAttackPipeline:
         iou_thr: float = 0.5,
         success_thr: float = 0.5,
         log_interval: int = 50,
-        mmdet_inference_mode: str = 'legacy',
-        yolo_inference_mode: str = 'legacy',
         **attack_kwargs,
     ):
         if attack_method not in self.SUPPORTED_ATTACKS:
@@ -85,14 +78,12 @@ class DetectionAttackPipeline:
                 config_path, checkpoint_path,
                 device=device, score_thr=score_thr, iou_thr=iou_thr,
                 success_thr=success_thr,
-                inference_mode=mmdet_inference_mode,
             )
         elif model_type == 'yolov8':
             self.model = Yolov8ModelAdapter(
                 checkpoint_path,
                 device=device, score_thr=score_thr, iou_thr=iou_thr,
                 success_thr=success_thr,
-                inference_mode=yolo_inference_mode,
             )
         else:
             raise ValueError(f"Unsupported model_type: {model_type}")

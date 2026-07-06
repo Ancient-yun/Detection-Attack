@@ -9,7 +9,6 @@ from adversarial_attack.model_adapter import Yolov8ModelAdapter
 def test_yolov8_predict_uses_ultralytics_high_level_path() -> None:
     adapter = Yolov8ModelAdapter.__new__(Yolov8ModelAdapter)
     adapter.score_thr = 0.5
-    adapter.inference_mode = "legacy"
 
     converted = np.zeros((640, 640, 3), dtype=np.uint8)
     adapter._tensor_to_numpy_img = lambda _x: converted

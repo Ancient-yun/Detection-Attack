@@ -65,7 +65,6 @@ def run(args):
         score_thr=args.score_thr,
         iou_thr=args.iou_thr,
         success_thr=args.success_thr,
-        mmdet_inference_mode=args.mmdet_inference_mode,
         seed=args.seed if args.attack == "sparse_evo" else None,
         **({"pop_size": 10, "cr": 0.9, "mu": 0.01}
            if args.attack == "sparse_evo" else {}),
@@ -177,7 +176,6 @@ def main():
     pr.add_argument("--score-thr", type=float, default=0.5)
     pr.add_argument("--iou-thr", type=float, default=0.5)
     pr.add_argument("--success-thr", type=float, default=0.7)
-    pr.add_argument("--mmdet-inference-mode", default="direct_tensor")
     pr.add_argument("--out", required=True)
     pr.set_defaults(func=run)
 

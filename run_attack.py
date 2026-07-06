@@ -128,26 +128,16 @@ def parse_args():
         '--device', default='cuda:0',
         help='Device (default: cuda:0)',
     )
+    # Deprecated and ignored: the attack is now tensor-only for every model
+    # (original-size image in, preprocessing inside the model). Kept so existing
+    # launch scripts that still pass these flags do not error.
     parser.add_argument(
-        '--mmdet-inference-mode',
-        default='legacy',
-        choices=['legacy', 'legacy_cached', 'direct_tensor'],
-        help=(
-            'MMDetection inference path. "legacy" uses inference_detector; '
-            '"legacy_cached" reuses the same MMDetection test pipeline; '
-            '"direct_tensor" feeds tensors directly to model.test_step '
-            '(default: legacy).'
-        ),
+        '--mmdet-inference-mode', default=None,
+        help='Deprecated and ignored (attack is tensor-only).',
     )
     parser.add_argument(
-        '--yolo-inference-mode',
-        default='legacy',
-        choices=['legacy', 'direct_tensor'],
-        help=(
-            'YOLOv8 inference path. "legacy" preserves Ultralytics '
-            'high-level prediction semantics; "direct_tensor" avoids CPU '
-            'image conversion but is not bitwise-equivalent (default: legacy).'
-        ),
+        '--yolo-inference-mode', default=None,
+        help='Deprecated and ignored (attack is tensor-only).',
     )
     parser.add_argument(
         '--output-dir', default='outputs/attack_results',
@@ -366,10 +356,6 @@ def main():
     print(f"[Main] Attack method: {args.attack}")
     print(f"[Main] Max queries: {args.max_query}")
     print(f"[Main] Output dir: {output_dir}")
-    if args.model_type == 'mmdet':
-        print(f"[Main] MMDet inference mode: {args.mmdet_inference_mode}")
-    if args.model_type == 'yolov8':
-        print(f"[Main] YOLO inference mode: {args.yolo_inference_mode}")
     if sample_selection is not None:
         print(f"[Main] Sample strategy: {sample_selection.sample_strategy}")
         print(f"[Main] Sample seed: {sample_selection.sample_seed}")
@@ -391,8 +377,6 @@ def main():
         iou_thr=args.iou_thr,
         success_thr=args.success_thr,
         log_interval=args.log_interval,
-        mmdet_inference_mode=args.mmdet_inference_mode,
-        yolo_inference_mode=args.yolo_inference_mode,
         **attack_kwargs,
     )
 
