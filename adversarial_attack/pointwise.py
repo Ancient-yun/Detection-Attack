@@ -193,8 +193,11 @@ class PointWiseAtt:
         # === Phase 1: Greedy pixel replacement ===
         terminate = False
         while not terminate:
-            indices = list(range(N))
-            random.shuffle(indices)
+            # numpy permutation (C-speed) instead of random.shuffle on a
+            # 3.2M-element Python list. NOTE: this draws from numpy's RNG, so
+            # results differ from the Python-random version (Option B: validated
+            # at metric level, not bitwise-identical).
+            indices = np.random.permutation(N)
 
             for index in indices:
                 old_value = x[index]
@@ -238,8 +241,11 @@ class PointWiseAtt:
         terminate = n_queries >= max_query
 
         while not terminate:
-            indices = list(range(N))
-            random.shuffle(indices)
+            # numpy permutation (C-speed) instead of random.shuffle on a
+            # 3.2M-element Python list. NOTE: this draws from numpy's RNG, so
+            # results differ from the Python-random version (Option B: validated
+            # at metric level, not bitwise-identical).
+            indices = np.random.permutation(N)
             improved = False
 
             for index in indices:
@@ -359,8 +365,11 @@ class PointWiseAtt:
         # === Phase 1: Group replacement ===
         terminate = False
         while not terminate:
-            indices = list(range(N))
-            random.shuffle(indices)
+            # numpy permutation (C-speed) instead of random.shuffle on a
+            # 3.2M-element Python list. NOTE: this draws from numpy's RNG, so
+            # results differ from the Python-random version (Option B: validated
+            # at metric level, not bitwise-identical).
+            indices = np.random.permutation(N)
 
             for group_idx in range(n_groups):
                 idx = indices[group_idx * npix:(group_idx + 1) * npix]
@@ -402,8 +411,11 @@ class PointWiseAtt:
         if self.verbose:
             print("[PW-Multi] Entering refinement stage")
         while not terminate:
-            indices = list(range(N))
-            random.shuffle(indices)
+            # numpy permutation (C-speed) instead of random.shuffle on a
+            # 3.2M-element Python list. NOTE: this draws from numpy's RNG, so
+            # results differ from the Python-random version (Option B: validated
+            # at metric level, not bitwise-identical).
+            indices = np.random.permutation(N)
             improved = False
 
             for group_idx in range(n_groups):
@@ -522,8 +534,11 @@ class PointWiseAtt:
         terminate = False
         while not terminate:
             n_groups = N // npix
-            indices = list(range(N))
-            random.shuffle(indices)
+            # numpy permutation (C-speed) instead of random.shuffle on a
+            # 3.2M-element Python list. NOTE: this draws from numpy's RNG, so
+            # results differ from the Python-random version (Option B: validated
+            # at metric level, not bitwise-identical).
+            indices = np.random.permutation(N)
 
             for group_idx in range(n_groups):
                 idx = indices[group_idx * npix:(group_idx + 1) * npix]
@@ -576,8 +591,11 @@ class PointWiseAtt:
         if self.verbose:
             print(f"[PW-Sched] Entering refinement stage (npix={npix})")
         while not terminate:
-            indices = list(range(N))
-            random.shuffle(indices)
+            # numpy permutation (C-speed) instead of random.shuffle on a
+            # 3.2M-element Python list. NOTE: this draws from numpy's RNG, so
+            # results differ from the Python-random version (Option B: validated
+            # at metric level, not bitwise-identical).
+            indices = np.random.permutation(N)
             improved = False
 
             for group_idx in range(n_groups):
