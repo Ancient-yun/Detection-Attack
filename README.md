@@ -92,6 +92,52 @@ bash run_yolo.bash
 
 ---
 
+## Tensor-only MMDetection inference
+
+MMDetection models (`--model-type mmdet`) use a tensor-only detector path during attack queries. The attack image stays as an `RGB float [0, 1]` tensor, and the adapter runs resize, normalization, and `model(..., mode='predict')` directly without converting the image back to NumPy.
+
+Pipeline:
+
+```text
+cv2.imread image
+-> BGR to RGB
+-> RGB float [0, 1] tensor
+-> attack modifies the tensor
+-> tensor resize from the MMDetection test config
+-> RGB mean/std normalization with mean/255 and std/255
+-> model(..., mode='predict')
+```
+
+For the default DDQ-DETR config, `Resize(scale=(1333, 800), keep_ratio=True)` keeps the aspect ratio. It does not force every image to exactly `1333x800`; it resizes each image so the long and short edges fit inside the configured bounds. For example, a `426x640` image becomes `800x1202`.
+
+Run with the prepared DDQ script:
+
+```bash
+docker-compose exec mmdet bash
+bash run_ddq.bash
+```
+
+Or run a small smoke test directly:
+
+```bash
+python run_attack.py \
+  --model-type mmdet \
+  --config configs/ddq/ddq-detr-4scale_r50_8xb2-12e_coco.py \
+  --checkpoint ckpt/ddq-detr-4scale_r50_8xb2-12e_coco_20230809_170711-42528127.pth \
+  --image-dir data/coco_amnesia/val2017 \
+  --ann-file data/coco_amnesia/instances_val2017_ori.json \
+  --attack sparse_evo \
+  --num-images 1
+```
+
+Notes:
+
+- `data/` and `*.pth` are ignored by git, so datasets and checkpoints are not pushed.
+- The tensor-only path avoids the previous GPU tensor -> CPU NumPy image -> detector conversion.
+- It is not bit-for-bit identical to the old NumPy `inference_detector` path because resizing is performed on float tensors instead of uint8 NumPy images.
+
+---
+
 ## 📊 결과물 및 확인
 공격이 종료되면 다음과 같은 체계적인 파일들이 `result/[attack_method]/[model_name]/[시간]/` 하위에 생성됩니다.
 
