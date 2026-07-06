@@ -137,12 +137,9 @@ class DetectionAttackPipeline:
         if img is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
 
-        # MMDetection resizing now happens once inside the tensor-only adapter.
-        # Keep the legacy fixed-size image for YOLO, whose adapter handles its
-        # own preprocessing through the Ultralytics API.
-        if self.model_type == 'yolov8':
-            h, w = self.model._img_size
-            img = cv2.resize(img, (w, h))
+        # No pre-resize for any model: the attack operates on the original-size
+        # image, and each adapter's model function f does its own preprocessing
+        # (MMDet: keep-ratio resize inside; YOLO: Ultralytics letterbox inside).
 
         # BGR → RGB, [0,255] → [0,1], HWC → CHW
         img = img[:, :, ::-1].copy()

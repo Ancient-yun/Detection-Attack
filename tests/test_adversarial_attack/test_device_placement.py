@@ -30,7 +30,9 @@ def test_load_image_respects_cpu_device(tmp_path):
     tensor = pipeline.load_image(str(image_path))
 
     assert tensor.device.type == "cpu"
-    assert tensor.shape == (1, 3, 4, 4)
+    # load_image no longer pre-resizes: the attack works on the original size
+    # and each adapter's model function f does its own preprocessing.
+    assert tensor.shape == (1, 3, 8, 8)
 
 
 def test_generate_starting_point_uses_original_image_device():

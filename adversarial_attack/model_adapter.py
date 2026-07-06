@@ -402,9 +402,9 @@ class Yolov8ModelAdapter:
         score_thr: Detection confidence threshold (default: 0.3).
         iou_thr: IoU threshold for bbox matching (default: 0.5).
         success_thr: Minimum attack success rate for predict_label (default: 0.5).
-        inference_mode: 'legacy' keeps Ultralytics high-level inference
-            semantics. 'direct_tensor' avoids CPU image conversion but can
-            produce small numeric differences in detections.
+        inference_mode: kept for backward compatibility. YOLO now has a single
+            path: the original-size image goes to Ultralytics, which letterboxes
+            internally and returns boxes in original coordinates.
     """
 
     SUPPORTED_INFERENCE_MODES = {'legacy', 'direct_tensor'}
@@ -429,11 +429,6 @@ class Yolov8ModelAdapter:
             raise ImportError(
                 "Please install ultralytics to use YOLOv8: `pip install ultralytics`"
             )
-        try:
-            from ultralytics.utils import nms as yolo_nms
-            non_max_suppression = yolo_nms.non_max_suppression
-        except ImportError:
-            from ultralytics.utils.ops import non_max_suppression
 
         self.device = device
         self.score_thr = score_thr
@@ -445,10 +440,10 @@ class Yolov8ModelAdapter:
         self.model = YOLO(checkpoint_path)
         self.model.to(device)
         self.model.model.eval()
-        self._non_max_suppression = non_max_suppression
         self.classes = list(self.model.names.values())
-        
-        # Original default input size for standard yolo
+
+        # YOLO's internal inference size. The attack still operates on the
+        # original image; Ultralytics letterboxes to this size inside predict.
         self._img_size = (640, 640)
 
         # Reference detections
@@ -464,7 +459,14 @@ class Yolov8ModelAdapter:
         img = img[:, :, ::-1]  # RGB -> BGR
         return np.ascontiguousarray(img)
 
-    def _predict_legacy(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
+    def _predict_ultralytics(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
+        """Model function f for YOLO.
+
+        Takes an original-size RGB [0, 1] tensor. Ultralytics performs its own
+        letterbox resize to the model input size, runs inference, then rescales
+        boxes back to the original image size, so the attack always works in
+        original-image space (no pre-resize in the pipeline).
+        """
         img_np = self._tensor_to_numpy_img(x)
         results = self.model(img_np, verbose=False)
         boxes = results[0].boxes
@@ -475,46 +477,8 @@ class Yolov8ModelAdapter:
             'scores': boxes.conf[mask].cpu().numpy(),
         }
 
-    def _predict_direct_tensor(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
-        if x.dim() == 3:
-            x = x.unsqueeze(0)
-        input_tensor = x.detach().to(self.device)
-        if input_tensor.dtype != torch.float32:
-            input_tensor = input_tensor.float()
-
-        with torch.no_grad():
-            preds = self.model.model(input_tensor)
-
-        dets = self._non_max_suppression(
-            preds,
-            conf_thres=self.score_thr,
-            iou_thres=self.iou_thr,
-            max_det=300,
-            nc=0,
-            end2end=getattr(self.model.model, "end2end", False),
-        )[0]
-
-        if dets.numel() == 0:
-            return {
-                'bboxes': np.empty((0, 4), dtype=np.float32),
-                'labels': np.empty((0,), dtype=int),
-                'scores': np.empty((0,), dtype=np.float32),
-            }
-
-        bboxes = dets[:, :4].detach().cpu().numpy()
-        labels = dets[:, 5].detach().cpu().numpy().astype(int)
-        scores = dets[:, 4].detach().cpu().numpy()
-
-        return {
-            'bboxes': bboxes,
-            'labels': labels,
-            'scores': scores,
-        }
-
     def predict(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
-        if self.inference_mode == 'direct_tensor':
-            return self._predict_direct_tensor(x)
-        return self._predict_legacy(x)
+        return self._predict_ultralytics(x)
 
     def predict_label(self, x: torch.Tensor) -> int:
         if self._ref_bboxes is None:
