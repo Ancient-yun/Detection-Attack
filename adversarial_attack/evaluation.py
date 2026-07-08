@@ -211,16 +211,11 @@ def _load_coco_annotations(
             file_to_anns[base_name] = {"bboxes": [], "labels": []}
 
         x, y, width, height = ann["bbox"]
-        orig_h, orig_w = img_id_to_size[ann["image_id"]]
-        scale_x = model_w / orig_w
-        scale_y = model_h / orig_h
+        # Tensor-only pipeline: detections are returned in ORIGINAL image
+        # coordinates (the model resizes internally and rescales boxes back), so
+        # keep GT in original coords too — no model-input scaling.
         file_to_anns[base_name]["bboxes"].append(
-            [
-                x * scale_x,
-                y * scale_y,
-                (x + width) * scale_x,
-                (y + height) * scale_y,
-            ]
+            [x, y, x + width, y + height]
         )
         file_to_anns[base_name]["labels"].append(cat_id_to_idx[ann["category_id"]])
 
