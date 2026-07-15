@@ -14,6 +14,7 @@ import numpy as np
 import cv2
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
+from mmdet.evaluation.functional import eval_map
 
 from .model_adapter import MMDetModelAdapter, Yolov8ModelAdapter
 from .sparse_evo import SpaEvoAtt
@@ -42,6 +43,7 @@ class DetectionAttackPipeline:
         score_thr: Detection confidence threshold.
         iou_thr: IoU threshold for attack success matching.
         success_thr: Minimum success rate to declare attack successful.
+        class_mapping: Output class mapping, such as ``coco-to-voc``.
         log_interval: Print progress every N queries.
         attack_kwargs: Additional kwargs for the attack class.
     """
@@ -60,6 +62,7 @@ class DetectionAttackPipeline:
         score_thr: float = 0.3,
         iou_thr: float = 0.5,
         success_thr: float = 0.5,
+        class_mapping: str = 'none',
         log_interval: int = 50,
         **attack_kwargs,
     ):
@@ -82,13 +85,13 @@ class DetectionAttackPipeline:
             self.model = MMDetModelAdapter(
                 config_path, checkpoint_path,
                 device=device, score_thr=score_thr, iou_thr=iou_thr,
-                success_thr=success_thr,
+                success_thr=success_thr, class_mapping=class_mapping,
             )
         elif model_type == 'yolov8':
             self.model = Yolov8ModelAdapter(
                 checkpoint_path,
                 device=device, score_thr=score_thr, iou_thr=iou_thr,
-                success_thr=success_thr,
+                success_thr=success_thr, class_mapping=class_mapping,
             )
         else:
             raise ValueError(f"Unsupported model_type: {model_type}")
@@ -96,6 +99,7 @@ class DetectionAttackPipeline:
         print(
             f"[Pipeline] Model loaded. "
             f"Classes: {len(self.model.classes)}, "
+            f"Class mapping: {self.model.class_mapping}, "
             f"Input size: {self.model._img_size}"
         )
 
@@ -302,7 +306,11 @@ class DetectionAttackPipeline:
         snapshot_interval = max(1, max_query // 5)
         snapshots = {0: start_img.clone()}
 
-        if self.attack_method == 'sparse_evo':
+        if remaining_budget <= 0:
+            adv_img = start_img
+            attack_queries = 0
+            l0_trace = np.array([], dtype=np.int64)
+        elif self.attack_method == 'sparse_evo':
             adv_img, attack_queries, l0_trace, evo_snapshots = self.attack.evo_perturb(
                 oimg, start_img, olabel, tlabel,
                 max_query=remaining_budget,
@@ -725,6 +733,8 @@ class DetectionAttackPipeline:
         Returns:
             Dict with orig_mAP, adv_mAP, per_class_ap, mAP_drop.
         """
+        return evaluate_gt_map(self.model, results, ann_file, iou_thr, verbose)
+
         n_classes = len(self.model.classes)
         outputs_original_size = getattr(self.model, 'outputs_original_size', False)
         model_h, model_w = self.model._img_size

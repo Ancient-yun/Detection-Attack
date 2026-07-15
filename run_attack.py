@@ -41,6 +41,7 @@ torch.load = lambda *args, **kwargs: _original_load(
 )
 
 from adversarial_attack import DetectionAttackPipeline
+from adversarial_attack.class_mapping import SUPPORTED_CLASS_MAPPINGS
 from adversarial_attack.utils import build_output_dir, save_experiment_report
 from adversarial_attack.utils.image_selection import (
     select_image_paths,
@@ -101,6 +102,15 @@ def parse_args():
     parser.add_argument(
         '--dataset-name', default='dataset',
         help='Name of the dataset for organizing results (default: dataset)',
+    )
+    parser.add_argument(
+        '--class-map',
+        default='none',
+        choices=SUPPORTED_CLASS_MAPPINGS,
+        help=(
+            'Map detector outputs into another dataset label space. Use '
+            'coco-to-voc for COCO checkpoints on Pascal VOC images.'
+        ),
     )
     parser.add_argument(
         '--attack', default='sparse_evo',
@@ -354,6 +364,7 @@ def main():
 
     print(f"[Main] {len(image_paths)} image(s) to attack")
     print(f"[Main] Attack method: {args.attack}")
+    print(f"[Main] Class mapping: {args.class_map}")
     print(f"[Main] Max queries: {args.max_query}")
     print(f"[Main] Output dir: {output_dir}")
     if sample_selection is not None:
@@ -376,6 +387,7 @@ def main():
         score_thr=args.score_thr,
         iou_thr=args.iou_thr,
         success_thr=args.success_thr,
+        class_mapping=args.class_map,
         log_interval=args.log_interval,
         **attack_kwargs,
     )

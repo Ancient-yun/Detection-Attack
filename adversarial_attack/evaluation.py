@@ -3,9 +3,14 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
+from types import SimpleNamespace
 
 import numpy as np
-from mmdet.evaluation.functional import eval_map
+import torch
+from pycocotools.coco import COCO
+
+from .evaluation_1 import detections_to_coco_predictions, evaluate_coco_bbox
+from .types import Detections, ImageSample
 
 
 def dets_to_eval_format(
@@ -33,51 +38,19 @@ def compute_benign_map(
     iou_thr: float = 0.5,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    n_classes = len(model.classes)
-    annotations = []
-    orig_det_results = []
-    adv_det_results = []
-
-    for result in results:
-        orig_dets = result["orig_detections"]
-        adv_dets = result["adv_detections"]
-        annotations.append(
-            {
-                "bboxes": np.asarray(orig_dets["bboxes"], dtype=np.float32).reshape(-1, 4),
-                "labels": np.asarray(orig_dets["labels"], dtype=np.int64).reshape(-1),
-            }
-        )
-        orig_det_results.append(dets_to_eval_format(orig_dets, n_classes))
-        adv_det_results.append(dets_to_eval_format(adv_dets, n_classes))
-
-    orig_mAP, _ = eval_map(
-        orig_det_results,
-        annotations,
-        iou_thr=iou_thr,
-        logger="silent",
+    dataset, samples, label_to_cat_id = _build_benign_coco_dataset(model, results)
+    clean = evaluate_coco_bbox(
+        dataset, detections_to_coco_predictions(samples, [_as_detections(r['orig_detections']) for r in results], label_to_cat_id), dataset.coco.getImgIds()
     )
-    adv_mAP, adv_details = eval_map(
-        adv_det_results,
-        annotations,
-        iou_thr=iou_thr,
-        logger="silent",
+    adversarial = evaluate_coco_bbox(
+        dataset, detections_to_coco_predictions(samples, [_as_detections(r['adv_detections']) for r in results], label_to_cat_id), dataset.coco.getImgIds()
     )
-    per_class_ap = [
-        detail["ap"].item() if detail["ap"].size > 0 else 0.0
-        for detail in adv_details
-    ]
-    map_result = {
-        "orig_mAP": float(orig_mAP),
-        "adv_mAP": float(adv_mAP),
-        "per_class_ap": per_class_ap,
-        "mAP_drop": float(orig_mAP - adv_mAP),
-    }
+    map_result = _coco_map_result(clean, adversarial)
 
     if verbose:
         print(f"\n[Pipeline] === Benign mAP (IoU={iou_thr}) ===")
-        print(f"  Benign orig mAP : {orig_mAP:.4f}")
-        print(f"  Benign adv mAP  : {adv_mAP:.4f}")
-        print(f"  mAP Drop        : {map_result['mAP_drop']:.4f}")
+        print(f"  Benign clean AP50 : {clean['AP50']:.4f}")
+        print(f"  Benign adv AP50   : {adversarial['AP50']:.4f}")
 
     return map_result
 
@@ -89,60 +62,66 @@ def compute_gt_map(
     iou_thr: float = 0.5,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    n_classes = len(model.classes)
-    model_h, model_w = model._img_size
-    file_to_anns = _load_annotations(ann_file, model_h, model_w)
-    annotations = []
-    orig_det_results = []
-    adv_det_results = []
-
-    for result in results:
-        image_name = os.path.basename(result["image_path"])
-        base_name = os.path.splitext(image_name)[0]
-        orig_dets = result["orig_detections"]
-        adv_dets = result["adv_detections"]
-
-        if base_name in file_to_anns:
-            gt_bboxes = np.array(file_to_anns[base_name]["bboxes"], dtype=np.float32)
-            gt_labels = np.array(file_to_anns[base_name]["labels"], dtype=np.int64)
-        else:
-            gt_bboxes = np.zeros((0, 4), dtype=np.float32)
-            gt_labels = np.zeros((0,), dtype=np.int64)
-
-        annotations.append({"bboxes": gt_bboxes, "labels": gt_labels})
-        orig_det_results.append(dets_to_eval_format(orig_dets, n_classes))
-        adv_det_results.append(dets_to_eval_format(adv_dets, n_classes))
-
-    orig_mAP, _ = eval_map(
-        orig_det_results,
-        annotations,
-        iou_thr=iou_thr,
-        logger="silent",
-    )
-    adv_mAP, adv_details = eval_map(
-        adv_det_results,
-        annotations,
-        iou_thr=iou_thr,
-        logger="silent",
-    )
-    per_class_ap = [
-        detail["ap"].item() if detail["ap"].size > 0 else 0.0
-        for detail in adv_details
-    ]
-    map_result = {
-        "orig_mAP": float(orig_mAP),
-        "adv_mAP": float(adv_mAP),
-        "per_class_ap": per_class_ap,
-        "mAP_drop": float(orig_mAP - adv_mAP),
-    }
+    if os.path.isdir(ann_file):
+        raise ValueError('evaluation_1 COCO evaluation requires a COCO JSON annotation file.')
+    dataset, samples, label_to_cat_id = _build_gt_coco_dataset(model, results, ann_file)
+    clean = evaluate_coco_bbox(dataset, detections_to_coco_predictions(samples, [_as_detections(r['orig_detections']) for r in results], label_to_cat_id), dataset.coco.getImgIds())
+    adversarial = evaluate_coco_bbox(dataset, detections_to_coco_predictions(samples, [_as_detections(r['adv_detections']) for r in results], label_to_cat_id), dataset.coco.getImgIds())
+    map_result = _coco_map_result(clean, adversarial)
 
     if verbose:
         print(f"\n[Pipeline] === GT mAP (IoU={iou_thr}) ===")
-        print(f"  GT orig mAP : {orig_mAP:.4f}")
-        print(f"  GT adv mAP  : {adv_mAP:.4f}")
-        print(f"  mAP Drop    : {map_result['mAP_drop']:.4f}")
+        print(f"  GT clean AP50 : {clean['AP50']:.4f}")
+        print(f"  GT adv AP50   : {adversarial['AP50']:.4f}")
 
     return map_result
+
+
+def _as_detections(dets: dict[str, Any]) -> Detections:
+    return Detections(torch.as_tensor(dets['bboxes'], dtype=torch.float32), torch.as_tensor(dets['labels'], dtype=torch.int64), torch.as_tensor(dets['scores'], dtype=torch.float32))
+
+
+def _coco_map_result(clean: dict[str, float], adversarial: dict[str, float]) -> dict[str, Any]:
+    drop = float('nan') if clean['AP50'] < 0 or adversarial['AP50'] < 0 else clean['AP50'] - adversarial['AP50']
+    return {'orig_mAP': clean['AP50'], 'adv_mAP': adversarial['AP50'], 'mAP_drop': drop, 'clean_coco_metrics': clean, 'adv_coco_metrics': adversarial, 'per_class_ap': []}
+
+
+def _build_coco(dataset: dict[str, Any]) -> SimpleNamespace:
+    coco = COCO()
+    coco.dataset = dataset
+    coco.createIndex()
+    return SimpleNamespace(coco=coco)
+
+
+def _build_benign_coco_dataset(model: Any, results: list[dict[str, Any]]):
+    categories = [{'id': index + 1, 'name': name} for index, name in enumerate(model.classes)]
+    images, annotations, samples = [], [], []
+    ann_id = 1
+    for image_id, result in enumerate(results, 1):
+        image_path = result['image_path']
+        images.append({'id': image_id, 'file_name': os.path.basename(image_path), 'width': 1, 'height': 1})
+        samples.append(ImageSample(image_id, os.path.basename(image_path), image_path, np.zeros((1, 1, 3), dtype=np.uint8)))
+        for box, label in zip(result['orig_detections']['bboxes'], result['orig_detections']['labels']):
+            x1, y1, x2, y2 = map(float, box)
+            annotations.append({'id': ann_id, 'image_id': image_id, 'category_id': int(label) + 1, 'bbox': [x1, y1, x2-x1, y2-y1], 'area': max(0, x2-x1)*max(0, y2-y1), 'iscrowd': 0})
+            ann_id += 1
+    return _build_coco({'images': images, 'annotations': annotations, 'categories': categories}), samples, {i: i + 1 for i in range(len(model.classes))}
+
+
+def _build_gt_coco_dataset(model: Any, results: list[dict[str, Any]], ann_file: str):
+    with open(ann_file, 'r', encoding='utf-8') as file:
+        source = json.load(file)
+    wanted = {os.path.basename(r['image_path']) for r in results}
+    images = [image for image in source['images'] if os.path.basename(image['file_name']) in wanted]
+    image_ids = {image['id'] for image in images}
+    annotations = [ann for ann in source['annotations'] if ann['image_id'] in image_ids]
+    names = {category['name']: category['id'] for category in source['categories']}
+    label_to_cat_id = {label: names[name] for label, name in enumerate(model.classes) if name in names}
+    if not label_to_cat_id:
+        raise ValueError('Model classes do not match annotation category names.')
+    by_name = {os.path.basename(image['file_name']): image for image in images}
+    samples = [ImageSample(by_name[os.path.basename(r['image_path'])]['id'], os.path.basename(r['image_path']), r['image_path'], np.zeros((1, 1, 3), dtype=np.uint8)) for r in results]
+    return _build_coco({'images': images, 'annotations': annotations, 'categories': source['categories']}), samples, label_to_cat_id
 
 
 def _load_annotations(

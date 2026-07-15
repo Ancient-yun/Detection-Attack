@@ -13,6 +13,8 @@ from typing import Dict, Optional, Tuple
 from mmdet.apis import init_detector
 from mmdet.structures import DetDataSample
 
+from .class_mapping import (filter_and_remap_detections,
+                            resolve_class_mapping)
 from .metrics import match_detections
 
 
@@ -40,6 +42,7 @@ class MMDetModelAdapter:
         score_thr: Detection confidence threshold (default: 0.3).
         iou_thr: IoU threshold for bbox matching (default: 0.5).
         success_thr: Minimum attack success rate for predict_label (default: 0.5).
+        class_mapping: Output class mapping, such as ``coco-to-voc``.
 
     Tensor-only: an original-size RGB [0, 1] tensor goes in, all preprocessing
     (keep-ratio resize + normalization) happens inside the model function, and
@@ -54,6 +57,7 @@ class MMDetModelAdapter:
         score_thr: float = 0.3,
         iou_thr: float = 0.5,
         success_thr: float = 0.5,
+        class_mapping: str = 'none',
     ):
         self.device = device
         self.score_thr = score_thr
@@ -63,7 +67,15 @@ class MMDetModelAdapter:
         # Load mmdetection model
         self.model = init_detector(config_path, checkpoint_path, device=device)
         self.model.eval()
-        self.classes = self.model.dataset_meta.get('classes', [])
+        self.source_classes = tuple(
+            self.model.dataset_meta.get('classes', [])
+        )
+        resolved_mapping = resolve_class_mapping(
+            self.source_classes, class_mapping
+        )
+        self.class_mapping = class_mapping
+        self.classes = list(resolved_mapping.target_classes)
+        self._source_to_target = resolved_mapping.to_tensor(device)
 
         # Reference detections (set before attack loop)
         self._ref_bboxes = None
@@ -150,12 +162,11 @@ class MMDetModelAdapter:
 
     def _format_prediction(self, result) -> Dict[str, np.ndarray]:
         """Convert a DetDataSample into the attack result format."""
-        pred_instances = result.pred_instances
-        mask = pred_instances.scores >= self.score_thr
+        bboxes, labels, scores = self._format_prediction_tensors(result)
         return {
-            'bboxes': pred_instances.bboxes[mask].detach().cpu().numpy(),
-            'labels': pred_instances.labels[mask].detach().cpu().numpy(),
-            'scores': pred_instances.scores[mask].detach().cpu().numpy(),
+            'bboxes': bboxes.cpu().numpy(),
+            'labels': labels.cpu().numpy(),
+            'scores': scores.cpu().numpy(),
         }
 
     def _format_prediction_tensors(
@@ -164,11 +175,17 @@ class MMDetModelAdapter:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return filtered prediction tensors without a CPU copy."""
         pred_instances = result.pred_instances
-        mask = pred_instances.scores >= self.score_thr
+        bboxes, labels, scores = filter_and_remap_detections(
+            pred_instances.bboxes,
+            pred_instances.labels,
+            pred_instances.scores,
+            score_thr=self.score_thr,
+            source_to_target=getattr(self, '_source_to_target', None),
+        )
         return (
-            pred_instances.bboxes[mask].detach(),
-            pred_instances.labels[mask].detach(),
-            pred_instances.scores[mask].detach(),
+            bboxes.detach(),
+            labels.detach(),
+            scores.detach(),
         )
 
     def _predict_raw(
@@ -392,6 +409,7 @@ class Yolov8ModelAdapter:
         score_thr: Detection confidence threshold (default: 0.3).
         iou_thr: IoU threshold for bbox matching (default: 0.5).
         success_thr: Minimum attack success rate for predict_label (default: 0.5).
+        class_mapping: Output class mapping, such as ``coco-to-voc``.
 
     Single tensor path: the original-size image goes to Ultralytics, which
     letterboxes internally and returns boxes in original coordinates.
@@ -404,6 +422,7 @@ class Yolov8ModelAdapter:
         score_thr: float = 0.3,
         iou_thr: float = 0.5,
         success_thr: float = 0.5,
+        class_mapping: str = 'none',
     ):
         try:
             from ultralytics import YOLO
@@ -421,11 +440,20 @@ class Yolov8ModelAdapter:
         self.model = YOLO(checkpoint_path)
         self.model.to(device)
         self.model.model.eval()
-        self.classes = list(self.model.names.values())
+        self.source_classes = tuple(self.model.names.values())
+        resolved_mapping = resolve_class_mapping(
+            self.source_classes, class_mapping
+        )
+        self.class_mapping = class_mapping
+        self.classes = list(resolved_mapping.target_classes)
+        self._source_to_target = resolved_mapping.to_tensor(device)
 
         # YOLO's internal inference size. The attack still operates on the
         # original image; Ultralytics letterboxes to this size inside predict.
         self._img_size = (640, 640)
+        # Detections are returned in original image coordinates (Ultralytics
+        # rescales boxes back), so GT mAP must use original-coord annotations.
+        self.outputs_original_size = True
 
         # Reference detections
         self._ref_bboxes = None
@@ -451,11 +479,17 @@ class Yolov8ModelAdapter:
         img_np = self._tensor_to_numpy_img(x)
         results = self.model(img_np, verbose=False)
         boxes = results[0].boxes
-        mask = boxes.conf >= self.score_thr
+        bboxes, labels, scores = filter_and_remap_detections(
+            boxes.xyxy,
+            boxes.cls,
+            boxes.conf,
+            score_thr=self.score_thr,
+            source_to_target=getattr(self, '_source_to_target', None),
+        )
         return {
-            'bboxes': boxes.xyxy[mask].cpu().numpy(),
-            'labels': boxes.cls[mask].cpu().numpy().astype(int),
-            'scores': boxes.conf[mask].cpu().numpy(),
+            'bboxes': bboxes.cpu().numpy(),
+            'labels': labels.cpu().numpy(),
+            'scores': scores.cpu().numpy(),
         }
 
     def predict(self, x: torch.Tensor) -> Dict[str, np.ndarray]:
